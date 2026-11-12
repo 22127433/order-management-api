@@ -1,0 +1,187 @@
+package com.example.ordermanagement.web;
+
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.put;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.header;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
+import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+
+import com.example.ordermanagement.common.ConflictException;
+import com.example.ordermanagement.common.PageResponse;
+import com.example.ordermanagement.common.ResourceNotFoundException;
+import com.example.ordermanagement.order.OrderController;
+import com.example.ordermanagement.order.OrderResponse;
+import com.example.ordermanagement.order.OrderService;
+import com.example.ordermanagement.order.OrderStatus;
+import com.example.ordermanagement.product.ProductController;
+import com.example.ordermanagement.product.ProductResponse;
+import com.example.ordermanagement.product.ProductService;
+import java.math.BigDecimal;
+import java.time.Instant;
+import java.util.List;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
+import org.springframework.dao.CannotAcquireLockException;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.http.MediaType;
+import org.springframework.test.context.bean.override.mockito.MockitoBean;
+import org.springframework.test.web.servlet.MockMvc;
+
+@WebMvcTest({ProductController.class, OrderController.class})
+class ApiControllerTest {
+    private static final String PRODUCT = """
+            {"name":"Keyboard","description":"Mechanical","price":29.99,"stockQuantity":10}
+            """;
+    @Autowired private MockMvc mvc;
+    @MockitoBean private ProductService productService;
+    @MockitoBean private OrderService orderService;
+
+    @Test
+    void createProductReturns201AndLocation() throws Exception {
+        when(productService.create(any())).thenReturn(product());
+        mvc.perform(post("/api/products").contentType(MediaType.APPLICATION_JSON).content(PRODUCT))
+                .andExpect(status().isCreated()).andExpect(header().string("Location", "/api/products/1"))
+                .andExpect(jsonPath("$.id").value(1)).andExpect(jsonPath("$.price").value(29.99));
+    }
+
+    @Test
+    void readUpdateAndListReturn200WithDto() throws Exception {
+        when(productService.getById(1L)).thenReturn(product());
+        when(productService.update(any(), any())).thenReturn(product());
+        when(productService.findAll(0, 20))
+                .thenReturn(new PageResponse<>(List.of(product()), 0, 20, 1, 1, true));
+        mvc.perform(get("/api/products/1")).andExpect(status().isOk()).andExpect(jsonPath("$.name").value("Keyboard"));
+        mvc.perform(put("/api/products/1").contentType(MediaType.APPLICATION_JSON).content(PRODUCT))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.stockQuantity").value(10));
+        mvc.perform(get("/api/products")).andExpect(status().isOk())
+                .andExpect(jsonPath("$.content[0].id").value(1)).andExpect(jsonPath("$.totalElements").value(1));
+    }
+
+    @Test
+    void deleteReturns204WithoutBody() throws Exception {
+        doNothing().when(productService).delete(1L);
+        mvc.perform(delete("/api/products/1")).andExpect(status().isNoContent());
+    }
+
+    @Test
+    void createOrderReturns201AndLocation() throws Exception {
+        when(orderService.create(any())).thenReturn(order(OrderStatus.CREATED));
+        mvc.perform(post("/api/orders").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"items\":[{\"productId\":1,\"quantity\":2}]}"))
+                .andExpect(status().isCreated()).andExpect(header().string("Location", "/api/orders/10"))
+                .andExpect(jsonPath("$.totalAmount").value(59.98));
+    }
+
+    @Test
+    void readAndCancelOrderReturn200() throws Exception {
+        when(orderService.getById(10L)).thenReturn(order(OrderStatus.CREATED));
+        when(orderService.cancel(10L)).thenReturn(order(OrderStatus.CANCELLED));
+        mvc.perform(get("/api/orders/10")).andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("CREATED"));
+        mvc.perform(post("/api/orders/10/cancel")).andExpect(status().isOk())
+                .andExpect(jsonPath("$.status").value("CANCELLED"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "{}",
+        "{\"name\":\" \",\"price\":1,\"stockQuantity\":0}",
+        "{\"name\":\"X\",\"price\":-1,\"stockQuantity\":0}",
+        "{\"name\":\"X\",\"price\":1.001,\"stockQuantity\":0}",
+        "{\"name\":\"X\",\"price\":1000000000000,\"stockQuantity\":0}",
+        "{\"name\":\"X\",\"price\":1,\"stockQuantity\":-1}",
+        "{\"name\":\"X\",\"price\":1,\"stockQuantity\":1.5}",
+        "{\"name\":\"X\",\"price\":1,\"stockQuantity\":0,\"unexpected\":true}",
+        "{"
+    })
+    void invalidProductsReturn400(String body) throws Exception {
+        mvc.perform(post("/api/products").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.path").value("/api/products"));
+        verifyNoInteractions(productService);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "{}", "{\"items\":[]}", "{\"items\":[null]}",
+        "{\"items\":[{\"productId\":1,\"quantity\":0}]}",
+        "{\"items\":[{\"productId\":1,\"quantity\":1000001}]}",
+        "{\"items\":[{\"productId\":0,\"quantity\":1}]}",
+        "{\"items\":[{\"productId\":1}]}",
+        "{\"items\":[{\"productId\":1,\"quantity\":1.5}]}"
+    })
+    void invalidNestedOrderItemsReturn400(String body) throws Exception {
+        mvc.perform(post("/api/orders").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.status").value(400));
+        verifyNoInteractions(orderService);
+    }
+
+    @Test
+    void beanValidationProvidesFieldErrors() throws Exception {
+        mvc.perform(post("/api/products").contentType(MediaType.APPLICATION_JSON).content("{}"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.fieldErrors").isNotEmpty());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"/api/products?page=-1", "/api/products?size=0", "/api/products?size=101",
+            "/api/products/0", "/api/orders/-1", "/api/products/abc"})
+    void invalidPaginationOrIdReturns400(String uri) throws Exception {
+        mvc.perform(get(uri)).andExpect(status().isBadRequest());
+        verifyNoInteractions(productService, orderService);
+    }
+
+    @Test
+    void missingProductReturns404() throws Exception {
+        when(productService.getById(1L)).thenThrow(new ResourceNotFoundException("Product", 1L));
+        mvc.perform(get("/api/products/1")).andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404)).andExpect(jsonPath("$.timestamp").exists());
+    }
+
+    @Test
+    void businessConflictReturns409() throws Exception {
+        when(orderService.cancel(10L)).thenThrow(new ConflictException("Order 10 is already cancelled"));
+        mvc.perform(post("/api/orders/10/cancel")).andExpect(status().isConflict())
+                .andExpect(jsonPath("$.message").value("Order 10 is already cancelled"));
+    }
+
+    @Test
+    void lockTimeoutReturns409() throws Exception {
+        when(orderService.cancel(10L)).thenThrow(new CannotAcquireLockException("internal SQL"));
+        mvc.perform(post("/api/orders/10/cancel")).andExpect(status().isConflict())
+                .andExpect(jsonPath("$.message").value("Resource is busy; retry the request"));
+    }
+
+    @Test
+    void foreignKeyConflictReturns409WithoutSqlDetails() throws Exception {
+        when(productService.update(any(), any())).thenThrow(new DataIntegrityViolationException("internal SQL"));
+        mvc.perform(put("/api/products/1").contentType(MediaType.APPLICATION_JSON).content(PRODUCT))
+                .andExpect(status().isConflict())
+                .andExpect(jsonPath("$.message").value("Operation conflicts with existing data"));
+    }
+
+    @Test
+    void unexpectedFailureReturns500WithoutInternalDetails() throws Exception {
+        when(productService.getById(1L)).thenThrow(new IllegalStateException("sensitive internals"));
+        mvc.perform(get("/api/products/1")).andExpect(status().isInternalServerError())
+                .andExpect(jsonPath("$.message").value("An unexpected error occurred"))
+                .andExpect(jsonPath("$.stackTrace").doesNotExist());
+    }
+
+    private ProductResponse product() {
+        return new ProductResponse(1L, "Keyboard", "Mechanical", new BigDecimal("29.99"), 10);
+    }
+
+    private OrderResponse order(OrderStatus status) {
+        return new OrderResponse(10L, status, new BigDecimal("59.98"), Instant.parse("2026-01-01T00:00:00Z"),
+                List.of(new OrderResponse.Item(1L, 1L, 2, new BigDecimal("29.99"), new BigDecimal("59.98"))));
+    }
+}

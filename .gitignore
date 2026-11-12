@@ -1,0 +1,44 @@
+# Maven build output and local verification artifacts
+target/
+.cache/
+*.class
+*.log
+
+# Local environment files; keep the safe template versionable
+.env
+.env.*
+!.env.example
+
+# Credentials, private keys, and local secret stores
+.aws/
+.ssh/
+credentials
+credentials.*
+secrets/
+secrets.*
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+id_rsa
+id_rsa.*
+id_ed25519
+id_ed25519.*
+
+# IntelliJ IDEA, VS Code, and Eclipse metadata/caches
+.idea/
+.vscode/
+.settings/
+.classpath
+.project
+.factorypath
+*.iml
+*.ipr
+*.iws
+
+# Operating-system metadata
+.DS_Store
+Thumbs.db
+Desktop.ini

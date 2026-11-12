@@ -1,0 +1,132 @@
+# Order Management API - VS Code REST Client
+# Run numbered requests in order after starting the API.
+# Named responses supply real IDs, including when the database already has data.
+# Create requests add records each time they are sent. Change baseUrl if needed.
+# Documentation: https://github.com/Huachao/vscode-restclient#request-variables
+@baseUrl = http://localhost:8080
+@keyboardId = {{createKeyboard.response.body.$.id}}
+@mouseId = {{createMouse.response.body.$.id}}
+@orderId = {{createOrder.response.body.$.id}}
+@unusedProductId = {{createUnusedProduct.response.body.$.id}}
+
+### 01. Create Product: keyboard -> 201 + Location; stock 20
+# @name createKeyboard
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+
+{
+  "name": "Mechanical Keyboard",
+  "description": "USB keyboard",
+  "price": 59.90,
+  "stockQuantity": 20
+}
+
+### 02. Create Product: mouse -> 201 + Location; stock 10
+# @name createMouse
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+
+{
+  "name": "Mouse",
+  "description": "USB mouse",
+  "price": 19.99,
+  "stockQuantity": 10
+}
+
+### 03. List Products -> 200; zero-based pagination, ascending ID
+GET {{baseUrl}}/api/products?page=0&size=10
+
+### 04. Get Product -> 200
+GET {{baseUrl}}/api/products/{{keyboardId}}
+
+### 05. Update Product -> 200; PUT replaces editable fields, stock is absolute
+# Run before creating the order. Prices remain consistent with the README example.
+PUT {{baseUrl}}/api/products/{{keyboardId}}
+Content-Type: application/json
+
+{
+  "name": "Mechanical Keyboard",
+  "description": "USB keyboard",
+  "price": 59.90,
+  "stockQuantity": 20
+}
+
+### 06. Create Order -> 201 + Location; total 139.79; remaining stock 18 / 9
+# @name createOrder
+POST {{baseUrl}}/api/orders
+Content-Type: application/json
+
+{
+  "items": [
+    { "productId": {{keyboardId}}, "quantity": 2 },
+    { "productId": {{mouseId}}, "quantity": 1 }
+  ]
+}
+
+### 07. Get Order -> 200; status CREATED, total 139.79
+GET {{baseUrl}}/api/orders/{{orderId}}
+
+### 08. Validation Error -> 400; fieldErrors contains items[0].quantity
+POST {{baseUrl}}/api/orders
+Content-Type: application/json
+
+{
+  "items": [
+    { "productId": {{keyboardId}}, "quantity": 0 }
+  ]
+}
+
+### 09. Insufficient Stock Error -> 409; requested 21, available 18
+# Run before cancellation. No order is created and no stock is deducted.
+POST {{baseUrl}}/api/orders
+Content-Type: application/json
+
+{
+  "items": [
+    { "productId": {{keyboardId}}, "quantity": 21 }
+  ]
+}
+
+### 10. Duplicate Product Error -> 400; duplicate productId
+POST {{baseUrl}}/api/orders
+Content-Type: application/json
+
+{
+  "items": [
+    { "productId": {{keyboardId}}, "quantity": 1 },
+    { "productId": {{keyboardId}}, "quantity": 1 }
+  ]
+}
+
+### 11. Cancel Order -> 200; status CANCELLED; restored stock 20 / 10
+POST {{baseUrl}}/api/orders/{{orderId}}/cancel
+
+### 12. Cancel Again -> 409; stock must not be restored twice
+POST {{baseUrl}}/api/orders/{{orderId}}/cancel
+
+### 13. Confirm Restored Stock -> 200; stockQuantity 20
+GET {{baseUrl}}/api/products/{{keyboardId}}
+
+### 14. Delete Referenced Product -> 409, even after cancellation
+DELETE {{baseUrl}}/api/products/{{keyboardId}}
+
+### 15. Create an unused product for the successful deletion example -> 201
+# @name createUnusedProduct
+POST {{baseUrl}}/api/products
+Content-Type: application/json
+
+{
+  "name": "Disposable sample product",
+  "description": "Used only by this request sequence",
+  "price": 1.00,
+  "stockQuantity": 0
+}
+
+### 16. Delete Unused Product -> 204, empty response body
+DELETE {{baseUrl}}/api/products/{{unusedProductId}}
+
+### 17. Get Deleted Product -> 404
+GET {{baseUrl}}/api/products/{{unusedProductId}}
+
+### 18. Invalid Pagination -> 400
+GET {{baseUrl}}/api/products?page=-1&size=101
