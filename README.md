@@ -33,7 +33,7 @@ Dependency versions are managed by Spring Boot unless explicitly pinned in [pom.
 ## Features
 
 - Create, read, update, and delete products.
-- List products with pagination and a stable ascending ID order.
+- Search product names without case sensitivity, filter by price/stock, and paginate with validated sorting.
 - Create an order with multiple distinct products.
 - Reject unavailable stock and invalid quantities before changing inventory.
 - Calculate money with `BigDecimal` and store each item's original unit price.
@@ -63,6 +63,7 @@ src/main/java/com/example/ordermanagement/
 src/main/resources/
   application.yml
   db/migration/V1__create_order_management_tables.sql
+  db/migration/V2__index_products_price_id.sql
 src/test/java/com/example/ordermanagement/
   product/      Mockito service tests
   order/        Mockito business tests
@@ -120,7 +121,7 @@ Default base URL: `http://localhost:8080`. Request and response bodies use JSON.
 | Method | Endpoint | Description | Success |
 | --- | --- | --- | --- |
 | POST | `/api/products` | Create a product | 201 + `Location` |
-| GET | `/api/products?page=0&size=20` | List products | 200 |
+| GET | `/api/products?page=0&size=20` | Search, filter, sort, and paginate products | 200 |
 | GET | `/api/products/{id}` | Get a product | 200 |
 | PUT | `/api/products/{id}` | Replace editable product fields | 200 |
 | DELETE | `/api/products/{id}` | Delete an unreferenced product | 204, empty body |
@@ -128,7 +129,33 @@ Default base URL: `http://localhost:8080`. Request and response bodies use JSON.
 | GET | `/api/orders/{id}` | Get an order and its items | 200 |
 | POST | `/api/orders/{id}/cancel` | Cancel an order and restore stock | 200 |
 
-Pagination starts at page `0`; page size must be between `1` and `100`. Products are sorted by ID ascending. `PUT` requires `name`, `price`, and `stockQuantity`; `description` is optional. Stock updates set an absolute quantity.
+Pagination starts at page `0`; page size must be between `1` and `100`. Products are sorted by ID ascending unless `sort` is supplied. `PUT` requires `name`, `price`, and `stockQuantity`; `description` is optional. Stock updates set an absolute quantity.
+
+### Product Search & Filtering
+
+All query parameters on `GET /api/products` are optional. Existing calls without filters keep the same defaults and `PageResponse` JSON shape.
+
+| Parameter | Behavior | Default |
+| --- | --- | --- |
+| `keyword` | Case-insensitive substring of **name**; surrounding whitespace is trimmed; blank means no search; at most 120 characters | No filter |
+| `minPrice` | Inclusive lower price bound, `BigDecimal`, must be nonnegative | No lower bound |
+| `maxPrice` | Inclusive upper price bound, `BigDecimal`, must be nonnegative and at least `minPrice` when both are set | No upper bound |
+| `inStock` | `true`: stock > 0; `false`: stock = 0; omitted: either | No filter |
+| `page` | Zero-based page number, must be nonnegative | `0` |
+| `size` | Page size, from 1 to 100 | `20` |
+| `sort` | One `field[,asc\|desc]`; allowed fields: `id`, `name`, `price`, `stockQuantity`; direction is case-insensitive and defaults to `asc` | `id,asc` |
+
+Filters combine with **AND**. A non-ID sort appends `id,asc` to give equal-valued products a deterministic order. Name sorting follows the database collation. Concurrent catalog changes can still move records between offset-based pages.
+
+The keyword is literal text: `%`, `_`, and `!` are escaped for SQL `LIKE`, and values are bound through JPA. URL-encode special characters (for example, use `keyword=50%25` to search for `50%`). Unsupported sort fields/directions, invalid types, negative prices, reversed ranges, or invalid page bounds return the existing `400` error shape. `page * size` must also fit JPA's maximum offset of `2,147,483,647`; larger offsets are rejected before executing a query.
+
+```http
+GET /api/products?keyword=KEYboard&minPrice=20&maxPrice=100&inStock=true&page=0&size=10&sort=price,asc
+GET /api/products?maxPrice=30&sort=name,desc
+GET /api/products?inStock=false
+```
+
+`totalElements` and `totalPages` describe the filtered result. Empty searches and pages beyond the last page return `200` with an empty `content` array. Bounds are compared exactly without rounding; `minPrice=19.990&maxPrice=19.99` is a valid equal-price range.
 
 | Status | Meaning |
 | --- | --- |
@@ -428,19 +455,23 @@ On Linux/macOS, replace `.\mvnw.cmd` with `sh mvnw`. Surefire runs `*Test`; Fail
 
 ### Recorded verification
 
-The code was compiled and packaged successfully during the review on **2026-11-12**, using Java 21.0.6, Maven 3.9.11, Docker Engine 27.3.1, and PostgreSQL 17.11. The existing local XML reports record:
+The product-search update was compiled and packaged successfully with `clean verify -Pintegration` on **2026-11-17**, using Java 21.0.6, Maven 3.9.11, Docker Engine 27.3.1, and PostgreSQL 17.11. The local Surefire/Failsafe XML reports record:
 
 | Suite | Test boundary | Passed |
 | --- | --- | ---: |
 | `OrderServiceTest` | JUnit 5 + Mockito; mocked repositories | 15 |
-| `ProductServiceTest` | JUnit 5 + Mockito; mocked repositories | 6 |
-| `ApiControllerTest` | MockMvc controller slice; mocked services | 34 |
+| `ProductServiceTest` | JUnit 5 + Mockito; mocked repositories | 7 |
+| `ProductSearchQueryTest` | JUnit 5; query validation and sort contract | 23 |
+| `ApiControllerTest` | MockMvc controller slice; mocked services | 51 |
 | `OrderManagementIT` | Spring context + real PostgreSQL/Testcontainers | 12 |
-| **Total** | **0 failures, 0 errors, 0 skipped** | **67** |
+| `ProductSearchIT` | Real PostgreSQL/Testcontainers; HTTP search, generated SQL, and query plans | 17 |
+| **Total** | **0 failures, 0 errors, 0 skipped** | **125** |
 
 Unit/controller tests cover business rules, invalid quantities, missing products, duplicates, repeated cancellation, HTTP status codes, and validation. The integration tests verify schema mapping, committed inventory changes, forced SQL failures and rollback during creation/cancellation, monetary round-trips, and concurrent inventory access. The locking tests observe a blocked request in PostgreSQL before allowing the first transaction to commit. Mock-based tests alone do not prove database transaction behavior.
 
-This is a recorded local result, not a claim that GitHub CI has already run. The [CI workflow](.github/workflows/ci.yml) is configured to run `verify -Pintegration` on push and pull requests. See [REVIEW.md](REVIEW.md) for the review record in Vietnamese. No performance benchmark has been recorded. Compose configuration has been validated; the full Compose application stack and API image build have not been executed as part of that review.
+Search tests cover case-insensitive name matching, combined/individual filters, exact inclusive decimal bounds, true/false/omitted stock filters, literal SQL metacharacters, default compatibility, every supported sort, deterministic ties, filtered totals, empty/out-of-range pages, and invalid inputs. `ProductSearchIT` verifies that generated JPA SQL contains filtering, ordering, database pagination, and a filtered count, and checks the new price index on a 20,000-row fixture.
+
+These are recorded local results; check GitHub Actions separately for CI results. The [CI workflow](.github/workflows/ci.yml) is configured to run `verify -Pintegration` on push and pull requests. See [REVIEW.md](REVIEW.md) for the earlier review record from 2026-11-12 in Vietnamese. No throughput benchmark has been recorded. Compose configuration was validated in that review; the full Compose application stack and API image build were not executed as part of it.
 
 Build output: `target/order-management-api-1.0.0.jar`. Test reports: `target/surefire-reports/` and `target/failsafe-reports/`. Build output is excluded from version control.
 
@@ -453,4 +484,19 @@ Build output: `target/order-management-api-1.0.0.jar`. Test reports: `target/sur
 - **History survives catalog changes.** Referenced products cannot be deleted. Order items retain quantity, unit price, and subtotal after cancellation or later product price changes.
 - **Duplicate products are rejected.** Requests must contain distinct product IDs; duplicate lines receive `400`. Clients should combine quantities before sending the order.
 - **Schema changes are explicit.** Flyway migrations define tables, constraints, and indexes; Hibernate validates rather than silently changing the schema.
+- **Search executes in PostgreSQL.** `ProductSearchQuery` validates input, `ProductSpecifications` builds optional predicates, and `JpaSpecificationExecutor.findAll(specification, pageable)` applies filtering, sorting, and pagination in SQL. DTO mapping happens only for the returned page. Spring Data executes a filtered count query when needed; it may infer the total for a partial page.
 - **Scope remains explicit.** There is no authentication or idempotency key. A repeated successful create-order request can create a second order. Product `PUT` sets absolute stock, so clients must supply the intended inventory value rather than calculating updates from a stale read.
+
+### Search query plans and indexes
+
+Migration [V2](src/main/resources/db/migration/V2__index_products_price_id.sql) adds B-tree `idx_products_price_id` on `(price, id)`, supporting selective price ranges and ascending price/ID pagination. The existing primary-key index supports the default ID order. This does not imply that every filter combination or descending price order avoids a sort; PostgreSQL chooses its plan based on selectivity and statistics. See the [PostgreSQL B-tree documentation](https://www.postgresql.org/docs/17/indexes-types.html).
+
+A plain index on `name` or `lower(name)` cannot efficiently serve an arbitrary leading-wildcard search such as `%keyboard%`. No such index is added. A GIN trigram index on `lower(name)` using [`pg_trgm`](https://www.postgresql.org/docs/17/pgtrgm.html) is a possible future optimization if realistic catalog sizes and measured keyword traffic justify the extension and index cost; it is not implemented here.
+
+No separate stock index is added: stock predicates can match much of the catalog, and indexing `stock_quantity` (including a partial index depending on it) adds maintenance work to inventory updates. Measure selectivity before adding one. Count queries and deep offset pages still have costs that a small page size cannot eliminate.
+
+`ProductSearchIT` loads 20,000 generated products in an isolated container, runs `ANALYZE`, captures the actual JPA page SQL, and runs `EXPLAIN (ANALYZE, BUFFERS)` for that price query and representative count/keyword/stock queries. It writes the plans to `target/product-search-explain.txt` and checks that the selective price page uses the migrated index. This fixture verifies query behavior and index use; it is not a throughput or production performance benchmark. Reproduce it with:
+
+```powershell
+.\mvnw.cmd verify -Pintegration '-Dit.test=ProductSearchIT'
+```

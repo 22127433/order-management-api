@@ -4,8 +4,6 @@ import com.example.ordermanagement.common.ConflictException;
 import com.example.ordermanagement.common.PageResponse;
 import com.example.ordermanagement.common.ResourceNotFoundException;
 import com.example.ordermanagement.order.OrderItemRepository;
-import org.springframework.data.domain.PageRequest;
-import org.springframework.data.domain.Sort;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -32,7 +30,11 @@ public class ProductService {
     }
 
     public PageResponse<ProductResponse> findAll(int page, int size) {
-        return PageResponse.from(productRepository.findAll(PageRequest.of(page, size, Sort.by("id")))
+        return findAll(new ProductSearchQuery(null, null, null, null, page, size, null));
+    }
+
+    public PageResponse<ProductResponse> findAll(ProductSearchQuery search) {
+        return PageResponse.from(productRepository.findAll(ProductSpecifications.matching(search), search.pageable())
                 .map(ProductResponse::from));
     }
 

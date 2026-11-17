@@ -130,3 +130,45 @@ GET {{baseUrl}}/api/products/{{unusedProductId}}
 
 ### 18. Invalid Pagination -> 400
 GET {{baseUrl}}/api/products?page=-1&size=101
+
+### 19. Search Product Name -> 200; case-insensitive substring
+GET {{baseUrl}}/api/products?keyword=KEYboard
+
+### 20. Filter Inclusive Price Range -> 200
+GET {{baseUrl}}/api/products?minPrice=19.99&maxPrice=59.90&sort=price,asc
+
+### 21. Combine Every Filter -> 200; only matching in-stock keyboards
+GET {{baseUrl}}/api/products?keyword=keyboard&minPrice=20&maxPrice=100&inStock=true&page=0&size=10&sort=price,asc
+
+### 22. Available Products -> 200; stockQuantity > 0
+GET {{baseUrl}}/api/products?inStock=true&sort=stockQuantity,desc
+
+### 23. Unavailable Products -> 200; stockQuantity = 0; may be empty
+GET {{baseUrl}}/api/products?inStock=false
+
+### 24. Upper Price Bound Only and Name Sorting -> 200
+GET {{baseUrl}}/api/products?maxPrice=30&sort=name,desc
+
+### 25. Second Filtered Page -> 200; totalElements counts all matching products
+GET {{baseUrl}}/api/products?minPrice=0&page=1&size=1&sort=price,asc
+
+### 26. Literal Percent Search -> 200; matches names containing 50%, may be empty
+GET {{baseUrl}}/api/products?keyword=50%25
+
+### 27. Negative Price Bound -> 400
+GET {{baseUrl}}/api/products?minPrice=-0.01
+
+### 28. Reversed Price Range -> 400
+GET {{baseUrl}}/api/products?minPrice=100&maxPrice=20
+
+### 29. Unsupported Sort Field -> 400
+GET {{baseUrl}}/api/products?sort=description,asc
+
+### 30. Unsupported Sort Direction -> 400
+GET {{baseUrl}}/api/products?sort=price,up
+
+### 31. Page Size Above Limit -> 400
+GET {{baseUrl}}/api/products?size=101
+
+### 32. Invalid Parameter Type -> 400
+GET {{baseUrl}}/api/products?minPrice=abc

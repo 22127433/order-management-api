@@ -3,6 +3,7 @@ package com.example.ordermanagement.product;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -15,12 +16,14 @@ import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.ArgumentMatchers;
 import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.data.domain.PageImpl;
 import org.springframework.data.domain.PageRequest;
 import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.test.util.ReflectionTestUtils;
 
 @ExtendWith(MockitoExtension.class)
@@ -46,13 +49,35 @@ class ProductServiceTest {
     void returnsStablePaginationMetadata() {
         Product product = product();
         PageRequest pageRequest = PageRequest.of(0, 2, Sort.by("id"));
-        when(repository.findAll(pageRequest)).thenReturn(new PageImpl<>(List.of(product), pageRequest, 1));
+        when(repository.findAll(ArgumentMatchers.<Specification<Product>>any(), eq(pageRequest)))
+                .thenReturn(new PageImpl<>(List.of(product), pageRequest, 1));
         var result = service.findAll(0, 2);
         assertThat(result.content()).hasSize(1);
         assertThat(result.page()).isZero();
         assertThat(result.size()).isEqualTo(2);
         assertThat(result.totalElements()).isEqualTo(1);
         assertThat(result.last()).isTrue();
+        verify(repository).findAll(ArgumentMatchers.<Specification<Product>>any(), eq(pageRequest));
+        verify(repository, never()).findAll();
+    }
+
+    @Test
+    void delegatesSearchAndSortedPaginationToRepository() {
+        ProductSearchQuery search = new ProductSearchQuery("old", new BigDecimal("0.50"),
+                new BigDecimal("2.00"), true, 1, 2, "price,desc");
+        PageRequest pageable = PageRequest.of(1, 2, Sort.by(Sort.Direction.DESC, "price").and(Sort.by("id")));
+        when(repository.findAll(ArgumentMatchers.<Specification<Product>>any(), eq(pageable)))
+                .thenReturn(new PageImpl<>(List.of(product()), pageable, 3));
+
+        var result = service.findAll(search);
+
+        assertThat(result.content()).extracting(ProductResponse::name).containsExactly("Old");
+        assertThat(result.page()).isEqualTo(1);
+        assertThat(result.totalElements()).isEqualTo(3);
+        assertThat(result.totalPages()).isEqualTo(2);
+        assertThat(result.last()).isTrue();
+        verify(repository).findAll(ArgumentMatchers.<Specification<Product>>any(), eq(pageable));
+        verify(repository, never()).findAll();
     }
 
     @Test
@@ -79,7 +104,7 @@ class ProductServiceTest {
         when(repository.findByIdForUpdate(1L)).thenReturn(Optional.of(product()));
         when(orderItemRepository.existsByProductId(1L)).thenReturn(true);
         assertThatThrownBy(() -> service.delete(1L)).isInstanceOf(ConflictException.class);
-        verify(repository, never()).delete(any());
+        verify(repository, never()).delete(any(Product.class));
     }
 
     @Test

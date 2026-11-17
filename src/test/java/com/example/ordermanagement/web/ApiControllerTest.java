@@ -2,6 +2,7 @@ package com.example.ordermanagement.web;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.doNothing;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.delete;
@@ -21,6 +22,7 @@ import com.example.ordermanagement.order.OrderService;
 import com.example.ordermanagement.order.OrderStatus;
 import com.example.ordermanagement.product.ProductController;
 import com.example.ordermanagement.product.ProductResponse;
+import com.example.ordermanagement.product.ProductSearchQuery;
 import com.example.ordermanagement.product.ProductService;
 import java.math.BigDecimal;
 import java.time.Instant;
@@ -57,13 +59,57 @@ class ApiControllerTest {
     void readUpdateAndListReturn200WithDto() throws Exception {
         when(productService.getById(1L)).thenReturn(product());
         when(productService.update(any(), any())).thenReturn(product());
-        when(productService.findAll(0, 20))
+        when(productService.findAll(new ProductSearchQuery(null, null, null, null, 0, 20, "id,asc")))
                 .thenReturn(new PageResponse<>(List.of(product()), 0, 20, 1, 1, true));
         mvc.perform(get("/api/products/1")).andExpect(status().isOk()).andExpect(jsonPath("$.name").value("Keyboard"));
         mvc.perform(put("/api/products/1").contentType(MediaType.APPLICATION_JSON).content(PRODUCT))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.stockQuantity").value(10));
         mvc.perform(get("/api/products")).andExpect(status().isOk())
                 .andExpect(jsonPath("$.content[0].id").value(1)).andExpect(jsonPath("$.totalElements").value(1));
+    }
+
+    @Test
+    void bindsSearchFiltersAndReturnsExistingPageShape() throws Exception {
+        var search = new ProductSearchQuery("KEYboard", new BigDecimal("10.00"),
+                new BigDecimal("40.00"), true, 1, 2, "price,desc");
+        when(productService.findAll(search))
+                .thenReturn(new PageResponse<>(List.of(product()), 1, 2, 3, 2, true));
+        mvc.perform(get("/api/products").param("keyword", "  KEYboard  ")
+                        .param("minPrice", "10.00").param("maxPrice", "40.00").param("inStock", "true")
+                        .param("page", "1").param("size", "2").param("sort", "price,desc"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.content[0].id").value(1))
+                .andExpect(jsonPath("$.page").value(1)).andExpect(jsonPath("$.size").value(2))
+                .andExpect(jsonPath("$.totalElements").value(3)).andExpect(jsonPath("$.totalPages").value(2));
+        verify(productService).findAll(search);
+    }
+
+    @Test
+    void bindsOutOfStockFilter() throws Exception {
+        var search = new ProductSearchQuery(null, null, null, false, 0, 20, "id,asc");
+        when(productService.findAll(search)).thenReturn(new PageResponse<>(List.of(), 0, 20, 0, 0, true));
+        mvc.perform(get("/api/products").param("inStock", "false"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.content").isEmpty());
+        verify(productService).findAll(search);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {
+        "minPrice=-0.01", "maxPrice=-1", "minPrice=10.01&maxPrice=10", "minPrice=abc",
+        "maxPrice=NaN", "inStock=unknown", "page=abc", "size=1.5", "sort=description",
+        "sort=name.length", "sort=price,up", "sort=price,", "sort=price,asc,id", "page=2147483647&size=100"
+    })
+    void invalidSearchQueriesReturn400BeforeServiceIsCalled(String query) throws Exception {
+        mvc.perform(get("/api/products?" + query)).andExpect(status().isBadRequest())
+                .andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.path").value("/api/products"));
+        verifyNoInteractions(productService);
+    }
+
+    @Test
+    void overlongKeywordReturns400() throws Exception {
+        mvc.perform(get("/api/products").param("keyword", "x".repeat(121)))
+                .andExpect(status().isBadRequest());
+        verifyNoInteractions(productService);
     }
 
     @Test
