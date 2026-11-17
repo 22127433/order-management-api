@@ -59,9 +59,29 @@ public class OrderService {
     }
 
     @Transactional
+    public OrderResponse confirm(Long id) {
+        CustomerOrder order = findForUpdate(id);
+        order.confirm();
+        return OrderResponse.from(order);
+    }
+
+    @Transactional
+    public OrderResponse ship(Long id) {
+        CustomerOrder order = findForUpdate(id);
+        order.ship();
+        return OrderResponse.from(order);
+    }
+
+    @Transactional
+    public OrderResponse deliver(Long id) {
+        CustomerOrder order = findForUpdate(id);
+        order.deliver();
+        return OrderResponse.from(order);
+    }
+
+    @Transactional
     public OrderResponse cancel(Long id) {
-        CustomerOrder order = orderRepository.findByIdForUpdate(id)
-                .orElseThrow(() -> new ResourceNotFoundException("Order", id));
+        CustomerOrder order = findForUpdate(id);
         order.ensureCancellable();
 
         Map<Long, Integer> quantities = new TreeMap<>();
@@ -71,6 +91,12 @@ public class OrderService {
         quantities.forEach((productId, quantity) -> products.get(productId).restoreStock(quantity));
         order.cancel();
         return OrderResponse.from(order);
+    }
+
+    private CustomerOrder findForUpdate(Long id) {
+        // All transitions serialize on the order row before inspecting its status.
+        return orderRepository.findByIdForUpdate(id)
+                .orElseThrow(() -> new ResourceNotFoundException("Order", id));
     }
 
     private Map<Long, Product> lockProducts(Map<Long, Integer> quantities) {

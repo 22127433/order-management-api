@@ -20,6 +20,7 @@ import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InjectMocks;
@@ -174,6 +175,52 @@ class OrderServiceTest {
         when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.empty());
         assertThatThrownBy(() -> service.getById(1L)).isInstanceOf(ResourceNotFoundException.class);
         assertThatThrownBy(() -> service.cancel(1L)).isInstanceOf(ResourceNotFoundException.class);
+        assertThatThrownBy(() -> service.confirm(1L)).isInstanceOf(ResourceNotFoundException.class);
+        assertThatThrownBy(() -> service.ship(1L)).isInstanceOf(ResourceNotFoundException.class);
+        assertThatThrownBy(() -> service.deliver(1L)).isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"CREATED,CONFIRMED", "CONFIRMED,SHIPPED", "SHIPPED,DELIVERED"})
+    void advancesLockedOrderWithoutChangingStockOrFinancialSnapshot(OrderStatus source, OrderStatus target) {
+        Product product = product(1L, "9.99", 7);
+        CustomerOrder order = persistedOrder(product, source);
+        var createdAt = order.getCreatedAt();
+        when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(order));
+
+        OrderResponse result = transition(target);
+
+        assertThat(result.status()).isEqualTo(target);
+        assertThat(order.getStatus()).isEqualTo(target);
+        assertThat(result.totalAmount()).isEqualByComparingTo("29.97");
+        assertThat(result.items().getFirst().unitPrice()).isEqualByComparingTo("9.99");
+        assertThat(result.items().getFirst().quantity()).isEqualTo(3);
+        assertThat(result.createdAt()).isEqualTo(createdAt);
+        assertThat(product.getStockQuantity()).isEqualTo(7);
+        verify(orderRepository).findByIdForUpdate(1L);
+        verifyNoInteractions(productRepository);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "CREATED,SHIPPED", "CREATED,DELIVERED",
+        "CONFIRMED,CONFIRMED", "CONFIRMED,DELIVERED", "CONFIRMED,CANCELLED",
+        "SHIPPED,CONFIRMED", "SHIPPED,SHIPPED", "SHIPPED,CANCELLED",
+        "DELIVERED,CONFIRMED", "DELIVERED,SHIPPED", "DELIVERED,DELIVERED", "DELIVERED,CANCELLED",
+        "CANCELLED,CONFIRMED", "CANCELLED,SHIPPED", "CANCELLED,DELIVERED"
+    })
+    void invalidTransitionLeavesStatusAndStockUnchanged(OrderStatus source, OrderStatus target) {
+        Product product = product(1L, "9.99", 7);
+        CustomerOrder order = persistedOrder(product, source);
+        when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(order));
+
+        assertThatThrownBy(() -> transition(target)).isInstanceOf(ConflictException.class)
+                .hasMessageContaining("from " + source + " to " + target);
+
+        assertThat(order.getStatus()).isEqualTo(source);
+        assertThat(product.getStockQuantity()).isEqualTo(7);
+        verify(orderRepository).findByIdForUpdate(1L);
+        verifyNoInteractions(productRepository);
     }
 
     @Test
@@ -188,6 +235,24 @@ class OrderServiceTest {
 
         assertThat(response.totalAmount()).isEqualByComparingTo("29.97");
         assertThat(response.items().getFirst().unitPrice()).isEqualByComparingTo("9.99");
+    }
+
+    private CustomerOrder persistedOrder(Product product, OrderStatus status) {
+        CustomerOrder order = CustomerOrder.create();
+        order.addItem(product, 3);
+        ReflectionTestUtils.setField(order, "id", 1L);
+        ReflectionTestUtils.setField(order, "status", status);
+        return order;
+    }
+
+    private OrderResponse transition(OrderStatus target) {
+        return switch (target) {
+            case CONFIRMED -> service.confirm(1L);
+            case SHIPPED -> service.ship(1L);
+            case DELIVERED -> service.deliver(1L);
+            case CANCELLED -> service.cancel(1L);
+            default -> throw new IllegalArgumentException("Unsupported target in test: " + target);
+        };
     }
 
     private Product product(Long id, String price, int stock) {

@@ -33,6 +33,21 @@ public class OrderController {
         return orderService.getById(id);
     }
 
+    @PostMapping("/{id}/confirm")
+    public OrderResponse confirm(@PathVariable @Positive Long id) {
+        return orderService.confirm(id);
+    }
+
+    @PostMapping("/{id}/ship")
+    public OrderResponse ship(@PathVariable @Positive Long id) {
+        return orderService.ship(id);
+    }
+
+    @PostMapping("/{id}/deliver")
+    public OrderResponse deliver(@PathVariable @Positive Long id) {
+        return orderService.deliver(id);
+    }
+
     @PostMapping("/{id}/cancel")
     public OrderResponse cancel(@PathVariable @Positive Long id) {
         return orderService.cancel(id);

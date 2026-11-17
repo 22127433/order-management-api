@@ -8,6 +8,7 @@
 @mouseId = {{createMouse.response.body.$.id}}
 @orderId = {{createOrder.response.body.$.id}}
 @unusedProductId = {{createUnusedProduct.response.body.$.id}}
+@fulfillmentOrderId = {{createFulfillmentOrder.response.body.$.id}}
 
 ### 01. Create Product: keyboard -> 201 + Location; stock 20
 # @name createKeyboard
@@ -172,3 +173,46 @@ GET {{baseUrl}}/api/products?size=101
 
 ### 32. Invalid Parameter Type -> 400
 GET {{baseUrl}}/api/products?minPrice=abc
+
+### 33. Create a separate order for fulfillment -> 201; keyboard stock 20 -> 19
+# @name createFulfillmentOrder
+# The order from request 06 was cancelled; do not reuse it for this sequence.
+POST {{baseUrl}}/api/orders
+Content-Type: application/json
+
+{
+  "items": [{ "productId": {{keyboardId}}, "quantity": 1 }]
+}
+
+### 34. Ship Before Confirmation -> 409; remains CREATED, stock 19
+POST {{baseUrl}}/api/orders/{{fulfillmentOrderId}}/ship
+
+### 35. Confirm -> 200; CREATED -> CONFIRMED, stock stays 19
+POST {{baseUrl}}/api/orders/{{fulfillmentOrderId}}/confirm
+
+### 36. Confirm Again -> 409; no repeated transition
+POST {{baseUrl}}/api/orders/{{fulfillmentOrderId}}/confirm
+
+### 37. Cancel Confirmed Order -> 409; stock must not be restored
+POST {{baseUrl}}/api/orders/{{fulfillmentOrderId}}/cancel
+
+### 38. Ship -> 200; CONFIRMED -> SHIPPED, stock stays 19
+POST {{baseUrl}}/api/orders/{{fulfillmentOrderId}}/ship
+
+### 39. Deliver -> 200; SHIPPED -> DELIVERED, stock stays 19
+POST {{baseUrl}}/api/orders/{{fulfillmentOrderId}}/deliver
+
+### 40. Deliver Again -> 409; DELIVERED is terminal
+POST {{baseUrl}}/api/orders/{{fulfillmentOrderId}}/deliver
+
+### 41. Cancel Delivered Order -> 409; stock must not be restored
+POST {{baseUrl}}/api/orders/{{fulfillmentOrderId}}/cancel
+
+### 42. Get Delivered Order -> 200; original price, total, items, and createdAt retained
+GET {{baseUrl}}/api/orders/{{fulfillmentOrderId}}
+
+### 43. Verify Stock After Fulfillment -> 200; stockQuantity stays 19
+GET {{baseUrl}}/api/products/{{keyboardId}}
+
+### 44. Confirm Previously Cancelled Order -> 409; cancelled order cannot be revived
+POST {{baseUrl}}/api/orders/{{orderId}}/confirm

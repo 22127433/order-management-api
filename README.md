@@ -6,7 +6,7 @@ A Java 21 and Spring Boot REST API for managing products, inventory, and orders.
 
 ## Project Overview
 
-Clients can manage a product catalog, place orders containing multiple products, and cancel orders to restore inventory. The server calculates prices and totals, checks stock availability, and persists inventory changes together with each order in a single transaction.
+Clients can manage a product catalog, place orders containing multiple products, confirm/ship/deliver orders, and cancel newly created orders to restore inventory. The server calculates prices and totals, checks stock availability, and persists inventory changes together with each order in a single transaction.
 
 The project focuses on a single Spring Boot application and PostgreSQL database. It has no frontend or authentication layer. It does not include payment processing, shipping, or customer accounts.
 
@@ -39,7 +39,8 @@ Dependency versions are managed by Spring Boot unless explicitly pinned in [pom.
 - Calculate money with `BigDecimal` and store each item's original unit price.
 - Commit or roll back order creation and inventory changes together.
 - Use `PESSIMISTIC_WRITE` locks to prevent concurrent orders from overselling inventory.
-- Cancel orders and restore stock once, including during concurrent cancellation requests.
+- Advance orders through confirmed, shipped, and delivered states without deducting stock again.
+- Cancel orders only from CREATED and restore stock once, including during concurrent requests.
 - Validate request DTOs and return consistent error responses.
 - Preserve order history by preventing deletion of referenced products.
 
@@ -64,6 +65,7 @@ src/main/resources/
   application.yml
   db/migration/V1__create_order_management_tables.sql
   db/migration/V2__index_products_price_id.sql
+  db/migration/V3__extend_order_lifecycle_statuses.sql
 src/test/java/com/example/ordermanagement/
   product/      Mockito service tests
   order/        Mockito business tests
@@ -112,7 +114,7 @@ erDiagram
 - Prices use `NUMERIC(19,2)`; subtotals and order totals use `NUMERIC(25,2)`. `createdAt` is an `Instant` stored as a timestamp with time zone.
 - Foreign keys and check constraints protect relationships, quantities, and monetary values. The order table is named `customer_orders` to avoid the SQL keyword `order`.
 
-See the [Flyway migration](src/main/resources/db/migration/V1__create_order_management_tables.sql) for the full schema. Flyway applies migrations at startup; Hibernate validates the mapping with `ddl-auto=validate`.
+See [V1](src/main/resources/db/migration/V1__create_order_management_tables.sql) for the base schema, [V2](src/main/resources/db/migration/V2__index_products_price_id.sql) for the price index, and [V3](src/main/resources/db/migration/V3__extend_order_lifecycle_statuses.sql) for the five allowed order status values. V3 replaces the status CHECK constraint without rewriting existing order or inventory data. The original migrations remain unchanged. Flyway applies migrations at startup; Hibernate validates the mapping with `ddl-auto=validate`.
 
 ## API Endpoints
 
@@ -127,7 +129,10 @@ Default base URL: `http://localhost:8080`. Request and response bodies use JSON.
 | DELETE | `/api/products/{id}` | Delete an unreferenced product | 204, empty body |
 | POST | `/api/orders` | Create an order | 201 + `Location` |
 | GET | `/api/orders/{id}` | Get an order and its items | 200 |
-| POST | `/api/orders/{id}/cancel` | Cancel an order and restore stock | 200 |
+| POST | `/api/orders/{id}/confirm` | Confirm a CREATED order | 200 |
+| POST | `/api/orders/{id}/ship` | Mark a CONFIRMED order as handed to the carrier | 200 |
+| POST | `/api/orders/{id}/deliver` | Mark a SHIPPED order as delivered | 200 |
+| POST | `/api/orders/{id}/cancel` | Cancel a CREATED order and restore stock | 200 |
 
 Pagination starts at page `0`; page size must be between `1` and `100`. Products are sorted by ID ascending unless `sort` is supplied. `PUT` requires `name`, `price`, and `stockQuantity`; `description` is optional. Stock updates set an absolute quantity.
 
@@ -161,10 +166,40 @@ GET /api/products?inStock=false
 | --- | --- |
 | 400 | Invalid JSON, validation failure, duplicate product IDs, or invalid pagination/IDs |
 | 404 | Product or order not found |
-| 409 | Insufficient stock, repeated cancellation, referenced product deletion, lock/database conflict, or stock restoration overflow |
+| 409 | Invalid/repeated state transition, insufficient stock, referenced product deletion, lock/database conflict, or stock restoration overflow |
 | 500 | Unexpected server error; internal exception details are not returned |
 
 Product names must be nonblank and at most 120 characters; descriptions allow up to 2,000 characters. Prices must be at least `0.01`, with at most 12 integer digits and 2 decimal places. Stock is a nonnegative Java integer. An order accepts 1–100 distinct products, with integer quantities from 1 to 1,000,000. Unknown JSON properties and fractional values for integer fields are rejected.
+
+### Order lifecycle and concurrency
+
+```mermaid
+stateDiagram-v2
+    [*] --> CREATED
+    CREATED --> CONFIRMED: confirm
+    CONFIRMED --> SHIPPED: ship
+    SHIPPED --> DELIVERED: deliver
+    CREATED --> CANCELLED: cancel
+    DELIVERED --> [*]
+    CANCELLED --> [*]
+```
+
+| Current status | Action | New status | Inventory change |
+| --- | --- | --- | --- |
+| CREATED | `POST /api/orders/{id}/confirm` | CONFIRMED | None |
+| CONFIRMED | `POST /api/orders/{id}/ship` | SHIPPED | None |
+| SHIPPED | `POST /api/orders/{id}/deliver` | DELIVERED | None |
+| CREATED | `POST /api/orders/{id}/cancel` | CANCELLED | Restore ordered quantities once |
+
+These are the only allowed transitions. DELIVERED and CANCELLED are terminal states. Skipping a step, moving backwards, repeating an action, or cancelling after confirmation returns `409` without changing stock/status. The new action endpoints accept no request body and return the existing `OrderResponse` DTO with `200`; missing IDs return `404`, and invalid path IDs return `400`. Existing create/read/cancel endpoints keep their response shapes and behavior for CREATED/CANCELLED orders, including the repeated-cancellation message.
+
+`OrderStatus.canTransitionTo` defines the transition rules, and `CustomerOrder` enforces them before mutation. Each public service action is a write `@Transactional` method and uses `OrderRepository.findByIdForUpdate` (`PESSIMISTIC_WRITE`) **before** checking status. Hibernate dirty checking persists the status before transaction completion; a runtime persistence failure rolls the transaction back.
+
+Stock is deducted only during order creation. Confirm/ship/deliver do not acquire product write locks or modify stock, item prices, totals, or creation time. Cancellation locks the order first, checks CREATED, then locks products in ascending ID order before restoring stock. Creation locks existing products in ascending ID order and inserts a new order; it does not acquire an existing order lock after product locks. This keeps the existing lock order and reduces deadlock risk without claiming deadlocks are impossible.
+
+At PostgreSQL's default READ COMMITTED isolation, a competing action waits for the order lock, then validates the committed status. If confirm commits first, cancel returns `409` and stock stays deducted. If cancel commits first, confirm returns `409` and stock is restored once. Duplicate confirm/ship/deliver requests have one success and one conflict. Adjacent actions can both succeed when their lock order produces a valid sequence, such as confirm then ship; a ship request that executes while the order is still CREATED fails. Locks last until commit/rollback, and the existing five-second lock timeout maps lock conflicts to `409`. See [PostgreSQL isolation](https://www.postgresql.org/docs/17/transaction-iso.html) and [locking](https://www.postgresql.org/docs/17/explicit-locking.html).
+
+These endpoints record fulfillment state; no carrier integration, payment processing, delivery timestamps, or status history is implemented. The database CHECK validates status membership; transition legality is enforced by the application, so direct SQL can bypass lifecycle rules.
 
 ## How to Run
 
@@ -431,6 +466,28 @@ Response: `200 OK`. Stock returns to `20` keyboards and `10` mice; the financial
 
 Cancelling again returns `409 Conflict` with message `Order 1 is already cancelled`. Deleting either referenced product also returns `409`, including after cancellation. The request file creates a separate unused product to demonstrate a successful `204` deletion.
 
+### Confirm, Ship, and Deliver
+
+Create a **separate** order for fulfillment; the order cancelled above cannot be confirmed. Replace `2` below with the ID returned by that new create request, then send the actions in order:
+
+```http
+POST http://localhost:8080/api/orders/2/confirm
+```
+
+This returns `200 OK` with the existing order response fields and `status: "CONFIRMED"`.
+
+```http
+POST http://localhost:8080/api/orders/2/ship
+```
+
+This returns `200 OK` with `status: "SHIPPED"`, meaning the order has been handed to the carrier.
+
+```http
+POST http://localhost:8080/api/orders/2/deliver
+```
+
+This returns `200 OK` with `status: "DELIVERED"`. None of these actions changes stock or monetary snapshots. Cancelling this delivered order returns `409` with message `Order 2 cannot transition from DELIVERED to CANCELLED`. Repeating delivery also returns `409`.
+
 ## Testing
 
 Run service unit tests and controller tests without a database, Docker, or `.env`:
@@ -455,19 +512,22 @@ On Linux/macOS, replace `.\mvnw.cmd` with `sh mvnw`. Surefire runs `*Test`; Fail
 
 ### Recorded verification
 
-The product-search update was compiled and packaged successfully with `clean verify -Pintegration` on **2026-11-17**, using Java 21.0.6, Maven 3.9.11, Docker Engine 27.3.1, and PostgreSQL 17.11. The local Surefire/Failsafe XML reports record:
+The order-lifecycle update was compiled and packaged successfully with `clean verify -Pintegration` on **2026-11-17**, using Java 21.0.6, Maven 3.9.11, Docker Engine 27.3.1, and PostgreSQL 17.11. The local Surefire/Failsafe XML reports record:
 
 | Suite | Test boundary | Passed |
 | --- | --- | ---: |
-| `OrderServiceTest` | JUnit 5 + Mockito; mocked repositories | 15 |
+| `OrderServiceTest` | JUnit 5 + Mockito; mocked repositories | 33 |
+| `OrderStatusTest` | JUnit 5; complete 25-pair transition matrix | 25 |
 | `ProductServiceTest` | JUnit 5 + Mockito; mocked repositories | 7 |
 | `ProductSearchQueryTest` | JUnit 5; query validation and sort contract | 23 |
-| `ApiControllerTest` | MockMvc controller slice; mocked services | 51 |
-| `OrderManagementIT` | Spring context + real PostgreSQL/Testcontainers | 12 |
+| `ApiControllerTest` | MockMvc controller slice; mocked services | 72 |
+| `OrderManagementIT` | Spring context + real PostgreSQL/Testcontainers | 40 |
 | `ProductSearchIT` | Real PostgreSQL/Testcontainers; HTTP search, generated SQL, and query plans | 17 |
-| **Total** | **0 failures, 0 errors, 0 skipped** | **125** |
+| **Total** | **0 failures, 0 errors, 0 skipped** | **217** |
 
-Unit/controller tests cover business rules, invalid quantities, missing products, duplicates, repeated cancellation, HTTP status codes, and validation. The integration tests verify schema mapping, committed inventory changes, forced SQL failures and rollback during creation/cancellation, monetary round-trips, and concurrent inventory access. The locking tests observe a blocked request in PostgreSQL before allowing the first transaction to commit. Mock-based tests alone do not prove database transaction behavior.
+Unit/controller tests cover business rules, invalid quantities, missing products, duplicates, repeated cancellation, HTTP status codes, and validation. The integration tests verify schema mapping, committed inventory changes, forced SQL failures and rollback during creation/cancellation, monetary round-trips, and concurrent inventory access. The overlap tests observe a blocked request in PostgreSQL before allowing the first transaction to commit. Mock-based tests alone do not prove database transaction behavior.
+
+Lifecycle coverage includes all 25 enum source/target pairs, valid fulfillment actions with unchanged stock/financial snapshots, every invalid action/state combination through real HTTP/service/database integration, and rollback/retry for each new action after a forced SQL failure. Concurrency tests observe duplicate confirm/ship/deliver requests waiting on the order row, both confirm-versus-cancel winner cases, and adjacent actions that succeed in valid serial order. A separate test schema is migrated to V2, populated with CREATED/CANCELLED orders, then upgraded to V3 to verify existing data is preserved and the expanded constraint is applied. These are controlled scenarios, not a proof that every possible interleaving is deadlock-free.
 
 Search tests cover case-insensitive name matching, combined/individual filters, exact inclusive decimal bounds, true/false/omitted stock filters, literal SQL metacharacters, default compatibility, every supported sort, deterministic ties, filtered totals, empty/out-of-range pages, and invalid inputs. `ProductSearchIT` verifies that generated JPA SQL contains filtering, ordering, database pagination, and a filtered count, and checks the new price index on a 20,000-row fixture.
 
@@ -478,6 +538,7 @@ Build output: `target/order-management-api-1.0.0.jar`. Test reports: `target/sur
 ## Design Decisions
 
 - **Transaction boundaries live in services.** Order creation locks products, validates all stock, deducts inventory, and saves the order/items in one transaction. Cancellation locks the order, validates its state, restores inventory, and changes the status together. Runtime failures roll back these changes.
+- **Lifecycle rules live in the domain.** Only CREATED → CONFIRMED → SHIPPED → DELIVERED and CREATED → CANCELLED are supported. Each transition locks the order in a service transaction. Fulfillment actions preserve stock and financial snapshots; cancellation is the only transition that restores inventory.
 - **Pessimistic locks protect inventory.** Product locks are acquired in ascending ID order to reduce deadlock risk. Product updates and deletion also use a write lock. Cancellation locks the order first so concurrent requests cannot restore the same stock twice. Connections use a five-second PostgreSQL lock timeout; lock conflicts return `409`.
 - **Money uses exact decimal arithmetic.** `BigDecimal` calculations and `NUMERIC` columns avoid binary floating-point rounding. The request never supplies an order total or item price; the server reads current product prices and stores snapshots.
 - **DTOs define the API boundary.** Request validation and explicit response mapping keep persistence details out of HTTP responses. `open-in-view=false` keeps entity access inside service transactions.

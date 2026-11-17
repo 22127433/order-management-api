@@ -60,14 +60,38 @@ public class CustomerOrder {
     }
 
     public void ensureCancellable() {
-        if (status != OrderStatus.CREATED) {
+        if (status == OrderStatus.CANCELLED) {
             throw new ConflictException("Order " + id + " is already cancelled");
         }
+        ensureTransitionAllowed(OrderStatus.CANCELLED);
+    }
+
+    public void confirm() {
+        transitionTo(OrderStatus.CONFIRMED);
+    }
+
+    public void ship() {
+        transitionTo(OrderStatus.SHIPPED);
+    }
+
+    public void deliver() {
+        transitionTo(OrderStatus.DELIVERED);
     }
 
     public void cancel() {
         ensureCancellable();
         status = OrderStatus.CANCELLED;
+    }
+
+    private void transitionTo(OrderStatus target) {
+        ensureTransitionAllowed(target);
+        status = target;
+    }
+
+    private void ensureTransitionAllowed(OrderStatus target) {
+        if (!status.canTransitionTo(target)) {
+            throw new ConflictException("Order " + id + " cannot transition from " + status + " to " + target);
+        }
     }
 
     public Long getId() { return id; }

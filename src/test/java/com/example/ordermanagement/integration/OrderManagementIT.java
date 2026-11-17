@@ -30,6 +30,10 @@ import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.flywaydb.core.Flyway;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.AutoConfigureMockMvc;
 import org.springframework.boot.test.context.SpringBootTest;
@@ -305,6 +309,228 @@ class OrderManagementIT {
         assertThat(loaded.items().getFirst().subtotal()).isEqualByComparingTo("999999999999990000.00");
         assertThat(jdbc.queryForObject("SELECT total_amount FROM customer_orders WHERE id = ?",
                 BigDecimal.class, created.id())).isEqualByComparingTo(loaded.totalAmount());
+    }
+
+    @Test
+    void fulfillmentLifecyclePersistsWithoutFurtherStockOrMoneyChanges() throws Exception {
+        ProductResponse product = product("9.99", 10);
+        OrderResponse created = orderService.create(request(product.id(), 3));
+        // Compare persisted snapshots: PostgreSQL stores microseconds, Instant can carry nanoseconds.
+        OrderResponse persisted = orderService.getById(created.id());
+        for (String action : List.of("confirm", "ship", "deliver")) {
+            String body = mvc.perform(post("/api/orders/{id}/{action}", created.id(), action))
+                    .andExpect(status().isOk()).andReturn().getResponse().getContentAsString();
+            OrderResponse result = objectMapper.readValue(body, OrderResponse.class);
+            OrderStatus expected = targetStatus(action);
+            assertThat(result).isEqualTo(new OrderResponse(persisted.id(), expected, persisted.totalAmount(),
+                    persisted.createdAt(), persisted.items()));
+            assertThat(orderService.getById(created.id()).status()).isEqualTo(expected);
+            assertThat(productService.getById(product.id()).stockQuantity()).isEqualTo(7);
+        }
+        assertThat(orderRepository.count()).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM order_items", Long.class)).isEqualTo(1);
+    }
+
+    @ParameterizedTest
+    @CsvSource({
+        "CREATED,ship", "CREATED,deliver",
+        "CONFIRMED,confirm", "CONFIRMED,deliver", "CONFIRMED,cancel",
+        "SHIPPED,confirm", "SHIPPED,ship", "SHIPPED,cancel",
+        "DELIVERED,confirm", "DELIVERED,ship", "DELIVERED,deliver", "DELIVERED,cancel",
+        "CANCELLED,confirm", "CANCELLED,ship", "CANCELLED,deliver", "CANCELLED,cancel"
+    })
+    void invalidLifecycleActionReturns409AndLeavesDatabaseUnchanged(OrderStatus source, String action)
+            throws Exception {
+        ProductResponse product = product("9.99", 10);
+        OrderResponse created = orderService.create(request(product.id(), 3));
+        advanceTo(created.id(), source);
+        OrderResponse before = orderService.getById(created.id());
+        int stockBefore = productService.getById(product.id()).stockQuantity();
+
+        mvc.perform(post("/api/orders/{id}/{action}", created.id(), action))
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.status").value(409));
+
+        assertThat(orderService.getById(created.id())).isEqualTo(before);
+        assertThat(productService.getById(product.id()).stockQuantity()).isEqualTo(stockBefore);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"confirm", "ship", "deliver"})
+    void concurrentDuplicateLifecycleActionsHaveOneSuccessAndOneConflict(String action) throws Exception {
+        ProductResponse product = product("9.99", 10);
+        OrderResponse order = orderService.create(request(product.id(), 3));
+        advanceTo(order.id(), sourceStatus(action));
+
+        List<Boolean> outcomes = overlapTransactions(() -> {
+            lifecycleAction(order.id(), action);
+            return true;
+        }, () -> {
+            try {
+                lifecycleAction(order.id(), action);
+                return true;
+            } catch (ConflictException exception) {
+                assertThat(exception).hasMessageContaining("cannot transition");
+                return false;
+            }
+        }, "customer_orders");
+
+        assertThat(outcomes).containsExactly(true, false);
+        assertThat(orderService.getById(order.id()).status()).isEqualTo(targetStatus(action));
+        assertThat(productService.getById(product.id()).stockQuantity()).isEqualTo(7);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"confirm", "cancel"})
+    void concurrentConfirmAndCancelRespectTheCommittedWinner(String firstAction) throws Exception {
+        ProductResponse product = product("9.99", 10);
+        OrderResponse order = orderService.create(request(product.id(), 3));
+        String secondAction = firstAction.equals("confirm") ? "cancel" : "confirm";
+
+        List<Boolean> outcomes = overlapTransactions(() -> {
+            lifecycleAction(order.id(), firstAction);
+            return true;
+        }, () -> {
+            try {
+                lifecycleAction(order.id(), secondAction);
+                return true;
+            } catch (ConflictException exception) {
+                assertThat(exception).hasMessageContaining("from " + targetStatus(firstAction));
+                return false;
+            }
+        }, "customer_orders");
+
+        assertThat(outcomes).containsExactly(true, false);
+        assertThat(orderService.getById(order.id()).status()).isEqualTo(targetStatus(firstAction));
+        assertThat(productService.getById(product.id()).stockQuantity())
+                .isEqualTo(firstAction.equals("cancel") ? 10 : 7);
+    }
+
+    @ParameterizedTest
+    @CsvSource({"confirm,ship", "ship,deliver"})
+    void concurrentAdjacentActionsCanBothSucceedInValidSerialOrder(String firstAction, String secondAction)
+            throws Exception {
+        ProductResponse product = product("9.99", 10);
+        OrderResponse order = orderService.create(request(product.id(), 3));
+        advanceTo(order.id(), sourceStatus(firstAction));
+
+        List<Boolean> outcomes = overlapTransactions(() -> {
+            lifecycleAction(order.id(), firstAction);
+            return true;
+        }, () -> {
+            lifecycleAction(order.id(), secondAction);
+            return true;
+        }, "customer_orders");
+
+        assertThat(outcomes).containsExactly(true, true);
+        assertThat(orderService.getById(order.id()).status()).isEqualTo(targetStatus(secondAction));
+        assertThat(productService.getById(product.id()).stockQuantity()).isEqualTo(7);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"confirm", "ship", "deliver"})
+    void failedLifecycleWriteRollsBackAndCanBeRetried(String action) {
+        ProductResponse product = product("9.99", 10);
+        OrderResponse order = orderService.create(request(product.id(), 3));
+        advanceTo(order.id(), sourceStatus(action));
+        OrderResponse before = orderService.getById(order.id());
+        jdbc.execute("""
+                CREATE FUNCTION test_reject_status_update() RETURNS trigger LANGUAGE plpgsql AS $$
+                BEGIN
+                    RAISE EXCEPTION 'Forced status write failure' USING ERRCODE = '23514';
+                END;
+                $$
+                """);
+        jdbc.execute("""
+                CREATE TRIGGER test_reject_status_update BEFORE UPDATE OF status ON customer_orders
+                FOR EACH ROW EXECUTE FUNCTION test_reject_status_update()
+                """);
+        try {
+            assertThatThrownBy(() -> lifecycleAction(order.id(), action))
+                    .isInstanceOf(DataIntegrityViolationException.class);
+        } finally {
+            jdbc.execute("DROP TRIGGER IF EXISTS test_reject_status_update ON customer_orders");
+            jdbc.execute("DROP FUNCTION IF EXISTS test_reject_status_update()");
+        }
+        assertThat(orderService.getById(order.id())).isEqualTo(before);
+        assertThat(productService.getById(product.id()).stockQuantity()).isEqualTo(7);
+        assertThat(lifecycleAction(order.id(), action).status()).isEqualTo(targetStatus(action));
+    }
+
+    @Test
+    void lifecycleMigrationUpgradesV2WithoutChangingExistingOrdersOrInventory() {
+        String schema = "lifecycle_upgrade";
+        try {
+            Flyway.configure().dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
+                    .schemas(schema).defaultSchema(schema).target("2").load().migrate();
+            jdbc.execute("INSERT INTO lifecycle_upgrade.products(name,price,stock_quantity) VALUES ('Existing',10,8)");
+            jdbc.execute("""
+                    INSERT INTO lifecycle_upgrade.customer_orders(status,total_amount,created_at)
+                    VALUES ('CREATED',10,now()), ('CANCELLED',10,now())
+                    """);
+            jdbc.execute("""
+                    INSERT INTO lifecycle_upgrade.order_items(order_id,product_id,quantity,unit_price,subtotal)
+                    VALUES (1,1,1,10,10), (2,1,1,10,10)
+                    """);
+
+            Flyway.configure().dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
+                    .schemas(schema).defaultSchema(schema).load().migrate();
+
+            assertThat(jdbc.queryForList("SELECT status FROM lifecycle_upgrade.customer_orders ORDER BY id", String.class))
+                    .containsExactly("CREATED", "CANCELLED");
+            assertThat(jdbc.queryForObject("SELECT stock_quantity FROM lifecycle_upgrade.products WHERE id=1", Integer.class))
+                    .isEqualTo(8);
+            assertThat(jdbc.queryForObject("SELECT count(*) FROM lifecycle_upgrade.order_items", Long.class)).isEqualTo(2);
+            jdbc.update("UPDATE lifecycle_upgrade.customer_orders SET status='CONFIRMED' WHERE id=1");
+            assertThatThrownBy(() -> jdbc.update("UPDATE lifecycle_upgrade.customer_orders SET status='PAID' WHERE id=1"))
+                    .isInstanceOf(DataIntegrityViolationException.class);
+        } finally {
+            jdbc.execute("DROP SCHEMA IF EXISTS lifecycle_upgrade CASCADE");
+        }
+    }
+
+    private void advanceTo(Long id, OrderStatus status) {
+        if (status == OrderStatus.CANCELLED) {
+            orderService.cancel(id);
+            return;
+        }
+        if (status != OrderStatus.CREATED) {
+            orderService.confirm(id);
+        }
+        if (status == OrderStatus.SHIPPED || status == OrderStatus.DELIVERED) {
+            orderService.ship(id);
+        }
+        if (status == OrderStatus.DELIVERED) {
+            orderService.deliver(id);
+        }
+    }
+
+    private OrderResponse lifecycleAction(Long id, String action) {
+        return switch (action) {
+            case "confirm" -> orderService.confirm(id);
+            case "ship" -> orderService.ship(id);
+            case "deliver" -> orderService.deliver(id);
+            case "cancel" -> orderService.cancel(id);
+            default -> throw new IllegalArgumentException("Unsupported action in test: " + action);
+        };
+    }
+
+    private OrderStatus sourceStatus(String action) {
+        return switch (action) {
+            case "confirm" -> OrderStatus.CREATED;
+            case "ship" -> OrderStatus.CONFIRMED;
+            case "deliver" -> OrderStatus.SHIPPED;
+            default -> throw new IllegalArgumentException("Unsupported action in test: " + action);
+        };
+    }
+
+    private OrderStatus targetStatus(String action) {
+        return switch (action) {
+            case "confirm" -> OrderStatus.CONFIRMED;
+            case "ship" -> OrderStatus.SHIPPED;
+            case "deliver" -> OrderStatus.DELIVERED;
+            case "cancel" -> OrderStatus.CANCELLED;
+            default -> throw new IllegalArgumentException("Unsupported action in test: " + action);
+        };
     }
 
     private void rejectStockUpdates() {

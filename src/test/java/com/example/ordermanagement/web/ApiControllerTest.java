@@ -29,6 +29,7 @@ import java.time.Instant;
 import java.util.List;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.web.servlet.WebMvcTest;
@@ -138,6 +139,48 @@ class ApiControllerTest {
     }
 
     @ParameterizedTest
+    @CsvSource({"confirm,CONFIRMED", "ship,SHIPPED", "deliver,DELIVERED"})
+    void lifecycleActionsReturn200WithOrderDto(String action, OrderStatus status) throws Exception {
+        when(lifecycleCall(action)).thenReturn(order(status));
+        mvc.perform(post("/api/orders/10/{action}", action)).andExpect(status().isOk())
+                .andExpect(jsonPath("$.id").value(10)).andExpect(jsonPath("$.status").value(status.name()))
+                .andExpect(jsonPath("$.totalAmount").value(59.98))
+                .andExpect(jsonPath("$.items[0].quantity").value(2));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"confirm", "ship", "deliver"})
+    void missingOrderForLifecycleActionReturns404(String action) throws Exception {
+        when(lifecycleCall(action)).thenThrow(new ResourceNotFoundException("Order", 10L));
+        mvc.perform(post("/api/orders/10/{action}", action)).andExpect(status().isNotFound())
+                .andExpect(jsonPath("$.status").value(404));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"confirm", "ship", "deliver"})
+    void invalidLifecycleTransitionReturns409(String action) throws Exception {
+        when(lifecycleCall(action)).thenThrow(new ConflictException("Transition is not allowed"));
+        mvc.perform(post("/api/orders/10/{action}", action)).andExpect(status().isConflict())
+                .andExpect(jsonPath("$.message").value("Transition is not allowed"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"confirm", "ship", "deliver"})
+    void lifecycleLockConflictReturns409WithoutSqlDetails(String action) throws Exception {
+        when(lifecycleCall(action)).thenThrow(new CannotAcquireLockException("internal SQL"));
+        mvc.perform(post("/api/orders/10/{action}", action)).andExpect(status().isConflict())
+                .andExpect(jsonPath("$.message").value("Resource is busy; retry the request"));
+    }
+
+    @ParameterizedTest
+    @CsvSource({"confirm,0", "confirm,-1", "confirm,abc", "ship,0", "ship,-1", "ship,abc",
+            "deliver,0", "deliver,-1", "deliver,abc"})
+    void invalidLifecycleIdReturns400BeforeService(String action, String id) throws Exception {
+        mvc.perform(post("/api/orders/{id}/{action}", id, action)).andExpect(status().isBadRequest());
+        verifyNoInteractions(orderService);
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {
         "{}",
         "{\"name\":\" \",\"price\":1,\"stockQuantity\":0}",
@@ -220,6 +263,15 @@ class ApiControllerTest {
         mvc.perform(get("/api/products/1")).andExpect(status().isInternalServerError())
                 .andExpect(jsonPath("$.message").value("An unexpected error occurred"))
                 .andExpect(jsonPath("$.stackTrace").doesNotExist());
+    }
+
+    private OrderResponse lifecycleCall(String action) {
+        return switch (action) {
+            case "confirm" -> orderService.confirm(10L);
+            case "ship" -> orderService.ship(10L);
+            case "deliver" -> orderService.deliver(10L);
+            default -> throw new IllegalArgumentException("Unsupported action in test: " + action);
+        };
     }
 
     private ProductResponse product() {

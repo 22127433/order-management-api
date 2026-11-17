@@ -1,10 +1,10 @@
 # Ôn phỏng vấn Fresher Java Backend — Order Management API
 
-Tài liệu được đối chiếu với source hiện tại ngày **12/11/2026**. Mỗi chủ đề đi từ khái niệm, ví dụ đơn giản, đến câu trả lời ngắn khi phỏng vấn. Các liên kết cuối đoạn trỏ đến file thật trong repository; tên method giúp tìm đúng vị trí. Phần kiến thức chung được phân biệt với phần project đã triển khai.
+Tài liệu được cập nhật theo source ngày **17/11/2026**, bao gồm Product Search và Order Lifecycle Management. Mỗi chủ đề đi từ khái niệm, ví dụ đơn giản, đến câu trả lời ngắn khi phỏng vấn. Các liên kết trỏ tới file thật; tên method giúp tìm đúng vị trí. Phân biệt kiến thức chung với tính năng đã triển khai.
 
-Project có CRUD Product, phân trang, tạo/đọc/hủy Order, transaction, kiểm soát tồn kho và xử lý lỗi. Chưa có đăng nhập, phân quyền, thanh toán, khách hàng hay idempotency key. `CustomerOrder` là tên entity đơn hàng, không có nghĩa đã có entity Customer. Căn cứ: [ProductController][pc], [OrderController][oc], [CustomerOrder][order], [pom.xml][pom].
+Project có CRUD/tìm kiếm/lọc/phân trang Product và vòng đời Order: CREATED → CONFIRMED → SHIPPED → DELIVERED hoặc CREATED → CANCELLED. Stock trừ khi tạo, chỉ hoàn khi hủy từ CREATED. Chưa có đăng nhập, phân quyền, thanh toán, khách hàng hay idempotency key. CustomerOrder không phải entity Customer. Căn cứ: [ProductController][pc], [OrderController][oc], [OrderService][os], [OrderStatus][status], [pom.xml][pom].
 
-Kết quả **67 lượt test pass** là kết quả đã chạy trong lần review trước, đối chiếu với báo cáo local và [REVIEW.md][review], không phải kết quả chạy mới khi viết tài liệu này. Không suy diễn số test thành phần trăm coverage hoặc số liệu hiệu năng. Nguồn test: [OrderServiceTest][ost], [ProductServiceTest][pst], [ApiControllerTest][webtest], [OrderManagementIT][it].
+Lần chạy local `clean verify -Pintegration` ngày **17/11/2026** ghi nhận **217 lượt test pass**, không failure/error/skip: 88 unit, 72 MVC slice và 57 PostgreSQL integration. Kết quả 67 test trong [REVIEW.md][review] là mốc lịch sử ngày 12/11; không dùng thay số liệu hiện tại. Không suy diễn số test thành coverage hay hiệu năng. Căn cứ: [OrderServiceTest][ost], [OrderStatusTest][statustest], [ProductServiceTest][pst], [ProductSearchQueryTest][searchquerytest], [ApiControllerTest][webtest], [OrderManagementIT][it], [ProductSearchIT][searchit], [README — Testing](README.md#testing).
 
 ## Mục lục
 
@@ -159,11 +159,13 @@ sequenceDiagram
 
 ### 2.6. Repository thực hiện query thế nào?
 
-Project có ba kiểu dùng repository:
+Project có bốn kiểu dùng repository:
 
-1. Method có sẵn từ `JpaRepository`: `findById`, `save`, `findAll(Pageable)`, `delete`. Spring Data điều phối tới JPA; không phải mọi method đều phân tích tên để tự tạo query. Căn cứ: [ProductService][ps], [ProductRepository][pr].
+1. Method có sẵn từ `JpaRepository`: `findById`, `save`, `delete`. Spring Data điều phối tới JPA; không phải mọi method đều phân tích tên để tự tạo query. Căn cứ: [ProductService][ps], [ProductRepository][pr].
 2. Derived query: `existsByProductId(id)` được phân tích theo property `product.id` của OrderItem để kiểm tra tham chiếu. Đây không phải SQL viết tay và không tải toàn bộ lịch sử chỉ để đếm ở Java. Căn cứ: [OrderItemRepository][oir], [ProductService.delete][ps].
 3. JPQL khai báo bằng `@Query`: `select p from Product p where p.id = :id`. `Product` là tên entity, không phải tên table `products`. `@Param` bind dữ liệu; `@Lock` bổ sung yêu cầu khóa. `findByIdForUpdate` ở đây có query tường minh, không tự thêm khóa chỉ nhờ chữ `ForUpdate` trong tên. Căn cứ: [ProductRepository][pr], [OrderRepository][or].
+
+4. Specification: ProductRepository mở rộng JpaSpecificationExecutor. ProductSpecifications tạo điều kiện tên/giá/stock bằng Criteria API, service gọi findAll(specification, pageable) để database lọc rồi phân trang. Không lọc toàn bộ danh sách trong Java. Căn cứ: [ProductRepository][pr], [ProductSpecifications][specifications], [ProductService.findAll][ps].
 
 **Trả lời ngắn:** “Em dùng CRUD method có sẵn, derived query existsByProductId và JPQL cho query khóa. Hibernate chuyển query về SQL phù hợp PostgreSQL. Lock đến từ annotation @Lock, không đến từ cách em đặt tên method.” [Repositories][pr], [exists query][oir].
 
@@ -171,7 +173,7 @@ Project có ba kiểu dùng repository:
 
 **Nền tảng và ví dụ:** Thay vì lấy 10.000 sản phẩm rồi cắt List, client yêu cầu một trang. `page=2,size=10` nghĩa là trang thứ ba, offset khái niệm là `2 × 10 = 20`, lấy tối đa 10 row. Đây là offset pagination, không phải cursor pagination. Căn cứ: [ProductController.findAll][pc], [ProductService.findAll][ps].
 
-Service tạo `PageRequest.of(page,size,Sort.by("id"))`, repository trả `Page<Product>`, `map(...)` chuyển từng entity thành DTO, rồi `PageResponse.from()` xuất content cùng metadata. Để biết tổng số bản ghi/trang, framework có thể cần count query; không khẳng định mọi lần luôn có đúng hai SQL vì có tối ưu theo kết quả trang. Controller giới hạn size 1–100. Căn cứ: [ProductService.findAll][ps], [PageResponse][page], [ProductController][pc].
+ProductSearchQuery kiểm tra filter, page/size và whitelist sort rồi tạo PageRequest; mặc định id tăng dần, sort trường khác có id làm tiêu chí phụ. Service truyền Specification và Pageable vào repository, map trang trả về sang DTO và PageResponse. Count query đếm kết quả đã lọc khi cần; không khẳng định mọi request luôn có hai SQL. Size 1–100; offset phải nằm trong giới hạn int của JPA. Căn cứ: [ProductSearchQuery][searchquery], [ProductService.findAll][ps], [PageResponse][page], [ProductSearchIT][searchit].
 
 **Trả lời ngắn:** “Em phân trang tại database bằng Pageable, page bắt đầu từ 0 và size tối đa 100. Kết quả Page được map sang DTO cùng metadata. Sort theo ID giúp thứ tự ổn định, nhưng khi dữ liệu thay đổi giữa các request thì offset pagination vẫn có giới hạn.” [Service][ps], [DTO phân trang][page].
 
@@ -250,6 +252,27 @@ Service tạo `PageRequest.of(page,size,Sort.by("id"))`, repository trả `Page<
 
 **Trả lời ngắn:** “Em sắp ID tăng dần bằng TreeMap trước khi lấy lock. Hai đơn gửi sản phẩm theo thứ tự trái ngược vẫn lấy khóa theo cùng một thứ tự, giảm deadlock do vòng chờ. Test reversed-items kiểm tra một tình huống cụ thể, không phải bằng chứng toán học không còn deadlock.” [Service][os], [concurrentOrdersWithReversedItemsFinishWithoutDeadlock][it].
 
+### 3.8. State machine và transaction đổi trạng thái
+
+**Nền tảng:** State là tình trạng hiện tại; transition là thao tác được phép đưa sang trạng thái khác. Ví dụ kiện hàng chưa bàn giao không thể báo giao thành công. Enum liệt kê giá trị hợp lệ; rule transition còn cần kiểm tra cặp trạng thái, không chỉ kiểm tra enum có tồn tại. Căn cứ: [OrderStatus.canTransitionTo][status], [CustomerOrder.ensureTransitionAllowed][order].
+
+| Trước | Thao tác | Sau | Stock |
+| --- | --- | --- | --- |
+| CREATED | confirm | CONFIRMED | Giữ nguyên lượng đã trừ khi create |
+| CONFIRMED | ship | SHIPPED | Giữ nguyên |
+| SHIPPED | deliver | DELIVERED | Giữ nguyên |
+| CREATED | cancel | CANCELLED | Hoàn quantity một lần |
+
+CANCELLED và DELIVERED kết thúc luồng; mọi cặp khác, kể cả lặp cùng trạng thái hoặc SHIPPED → CREATED, đều không hợp lệ. API không có setter trạng thái tùy ý. Rule nằm ở OrderStatus và được CustomerOrder gọi trước khi sửa state. Căn cứ: [enum][status], [CustomerOrder.confirm/ship/deliver/cancel][order], [controller][oc], [ma trận 25 cặp][statustest].
+
+**Transaction:** confirm, ship, deliver, cancel là public method có @Transactional ghi. Controller gọi service bean nên Spring proxy mở transaction; helper private findForUpdate không tự mở giao dịch mà chạy bên trong giao dịch đó. Helper lấy PESSIMISTIC_WRITE trên order rồi domain kiểm tra trạng thái. Dirty checking/flush ghi status; lỗi runtime/persistence làm rollback. Ba hành động fulfillment không gọi productRepository. Cancel khóa order, kiểm tra CREATED, rồi khóa products theo ID tăng dần; create khóa products theo ID rồi INSERT order mới, không quay lại khóa một order đã có. Căn cứ: [OrderService][os], [OrderRepository.findByIdForUpdate][or], [unit verifyNoInteractions][ost], [failedLifecycleWriteRollsBackAndCanBeRetried][it].
+
+**Ví dụ cạnh tranh:** Confirm giữ lock trước và commit thì cancel sau đọc CONFIRMED và nhận 409, stock vẫn đã trừ. Cancel commit trước thì confirm đọc CANCELLED và nhận 409, stock đã hoàn đúng một lần. Hai confirm trùng nhau chỉ một thành công. Confirm trước rồi ship chờ có thể cùng thành công vì sau khi lấy được lock, ship thấy CONFIRMED. Nếu ship chạy trước lúc CREATED thì nhận 409. Không suy ra hai request đồng thời luôn có đúng một success: phải xét chúng là cùng thao tác, hai nhánh cạnh tranh hay hai bước liên tiếp. Căn cứ: [concurrentConfirmAndCancelRespectTheCommittedWinner][it], [concurrentDuplicateLifecycleActionsHaveOneSuccessAndOneConflict][it], [concurrentAdjacentActionsCanBothSucceedInValidSerialOrder][it]; nền tảng [READ COMMITTED PostgreSQL](https://www.postgresql.org/docs/17/transaction-iso.html).
+
+**Schema:** V3 thay CHECK constraint để nhận năm tên trạng thái, giữ nguyên VARCHAR và EnumType.STRING, không sửa V1/V2 hoặc đổi stock cũ. CHECK chỉ kiểm tra tập giá trị, không ngăn trực tiếp một UPDATE SQL từ DELIVERED về CREATED; ứng dụng bảo vệ transition qua domain/service. Căn cứ: [V3][schemalifecycle], [CustomerOrder][order], [lifecycleMigrationUpgradesV2WithoutChangingExistingOrdersOrInventory][it].
+
+**Trả lời ngắn:** “Em định nghĩa bốn cạnh chuyển trạng thái trong enum, entity bảo vệ rule và service xử lý transaction/locking. Mỗi action khóa order trước khi đọc state. Confirm/ship/deliver không trừ thêm stock; cancel chỉ hoàn từ CREATED. PostgreSQL IT quan sát request chờ lock để kiểm tra duplicate, confirm–cancel và hai bước liền nhau; không dùng Mockito để kết luận khóa DB.” [OrderStatus][status], [OrderService][os], [OrderManagementIT][it].
+
 <a id="phan-4"></a>
 
 ## Phần 4. REST API
@@ -263,18 +286,18 @@ Service tạo `PageRequest.of(page,size,Sort.by("id"))`, repository trả `Page<
 | PUT | Gửi state thay thế cho các trường editable theo contract resource | `PUT /api/products/{id}` nhận name/price/stock, description tùy chọn: [controller][pc], [request][preq] |
 | DELETE | Xóa resource nếu được phép; idempotent xét tác động, không bắt buộc các lần trả cùng status | Xóa sản phẩm chưa có lịch sử đơn; lần sau có thể 404: [ProductService.delete][ps] |
 
-**Trả lời ngắn:** “Em dùng GET để đọc, POST để tạo đơn hoặc hủy đơn, PUT để thay các trường product, DELETE để xóa product chưa được tham chiếu. Hủy đơn đổi trạng thái và hoàn stock chứ không xóa order khỏi DB.” [ProductController][pc], [OrderController][oc], [OrderService.cancel][os].
+**Trả lời ngắn:** “Em dùng GET để đọc, POST để tạo đơn và thực hiện confirm/ship/deliver/cancel, PUT để thay các trường product, DELETE để xóa product chưa có tham chiếu. Các action đổi trạng thái trả DTO 200; sai trạng thái trả 409. Hủy không xóa order.” [ProductController][pc], [OrderController][oc], [OrderService][os].
 
 ### 4.2. HTTP status code
 
 | Mã | Khi nào trong code? | Nguồn |
 | --- | --- | --- |
 | 201 | Tạo Product/Order thành công, có Location | [ProductController.create][pc], [OrderController.create][oc] |
-| 200 | Đọc/cập nhật product, đọc/hủy order | [Controllers][pc], [OrderController][oc] |
+| 200 | Đọc/cập nhật product, đọc order và action lifecycle hợp lệ | [Controllers][pc], [OrderController][oc] |
 | 204 | Xóa Product thành công, không có body | [ProductController.delete][pc] |
 | 400 | Input, JSON, quantity, ID, pagination hoặc duplicate product sai | [DTO][oreq], [OrderService.create][os], [advice][advice] |
 | 404 | Không tìm thấy resource được yêu cầu | [ResourceNotFoundException][notfound], [advice][advice] |
-| 409 | Thiếu hàng, hủy trùng, xóa product có lịch sử, lock/DB conflict, overflow hoàn stock | [Product][product], [CustomerOrder][order], [ProductService][ps], [advice][advice] |
+| 409 | Chuyển trạng thái sai/lặp, thiếu hàng, xóa product có lịch sử, lock/DB conflict, overflow hoàn stock | [Product][product], [CustomerOrder][order], [ProductService][ps], [advice][advice] |
 | 500 | Lỗi không dự kiến; message chung, log nội bộ giữ exception | [GlobalExceptionHandler.handleUnexpected][advice] |
 
 **Trả lời ngắn:** “Em phân biệt lỗi request 400, resource không tồn tại 404 và xung đột với state hiện tại như thiếu stock là 409. Thành công tạo mới trả 201 và Location, còn xóa thành công trả 204. Lỗi bất ngờ trả 500 nhưng không đưa stack trace ra client.” [Controllers][pc], [advice][advice].
@@ -349,7 +372,7 @@ MockMvc không gửi HTTP qua một socket như trình duyệt/curl; nó gọi h
 
 ### 5.4. Đọc toàn bộ `OrderServiceTest`
 
-Class dùng MockitoExtension, hai repository mock và service được InjectMocks. Có **11 test method**, nhưng parameterized quantity chạy 5 case nên thành **15 lượt test**. Các assert dưới đây là assert trên object/mocks, không phải kết quả query DB. Căn cứ: [OrderServiceTest][ost].
+Class dùng MockitoExtension, hai repository mock và service được InjectMocks. Có **13 test method / 33 lượt**: quantity chạy 5 case, fulfillment hợp lệ 3 case, transition sai 15 case. Assert kiểm tra object/mocks, không query DB và không chứng minh transaction thật. Căn cứ: [OrderServiceTest][ost].
 
 | Method | Dữ liệu → hành động → kiểm tra |
 | --- | --- |
@@ -362,14 +385,21 @@ Class dùng MockitoExtension, hai repository mock và service được InjectMoc
 | [cancelsAndRestoresEveryProductOnceInOrder][ost] | Order có hai item; stub order và product bị khóa. Cancel chuyển state CANCELLED, giữ tổng 31.00, stock về 10/10, gọi khóa order rồi product 1/2. Gọi cancel lần nữa phải ném conflict và stock vẫn 10/10. Chưa mô phỏng hai transaction thật. |
 | [alreadyCancelledOrderDoesNotLockOrRestoreProducts][ost] | Order đã CANCELLED trước act. Assert conflict và không gọi productRepository, tức dừng trước hoàn kho. |
 | [cancelRejectsStockOverflowBeforeRestoringAnyProduct][ost] | Một product có stock=Integer.MAX_VALUE cần hoàn thêm 1. Assert conflict, mọi stock còn nguyên và order vẫn CREATED. Xác nhận kiểm tra overflow trước vòng restore. |
-| [missingOrderReturnsNotFoundForReadAndCancel][ost] | Cả query đọc thường và query khóa trả empty. Assert getById/cancel đều ném ResourceNotFoundException. |
+| [missingOrderReturnsNotFoundForReadAndCancel][ost] | Cả query đọc thường và query khóa trả empty. Assert getById/cancel/confirm/ship/deliver đều ném ResourceNotFoundException. |
 | [orderRetainsPriceSnapshotAfterProductPriceChanges][ost] | Thêm 3 item giá 9.99 vào order rồi đổi giá Product thành 100.00. Read DTO vẫn có unitPrice 9.99 và total 29.97. Không phải test round-trip PostgreSQL. |
+
+Các test lifecycle mới trong cùng class:
+
+| Method | Dữ liệu → hành động → kiểm tra |
+| --- | --- |
+| [advancesLockedOrderWithoutChangingStockOrFinancialSnapshot][ost] | 3 cạnh fulfillment hợp lệ; assert status mới, stock và snapshot tiền/createdAt giữ nguyên, khóa order và không tương tác productRepository. |
+| [invalidTransitionLeavesStatusAndStockUnchanged][ost] | 15 cạnh sai qua service; assert ConflictException, state/stock cũ, không gọi productRepository. Hủy CANCELLED đã có test riêng ở trên. |
 
 Helper `product()` dùng `ReflectionTestUtils` gán ID vì không có DB sinh ID; helper `item()` và `request()` tạo DTO. Mock `save(...).thenAnswer(...)` mô phỏng ID cho order. Reflection này chỉ ở test, không phải cách production cấp primary key. Căn cứ: [helpers trong OrderServiceTest][ost], [Product IDENTITY][product].
 
 ### 5.5. Đọc toàn bộ `ProductServiceTest`
 
-Có **6 test method / 6 lượt**, tất cả repository đều mock. Căn cứ: [ProductServiceTest][pst].
+Có **7 test method / 7 lượt**, repository đều mock. Căn cứ: [ProductServiceTest][pst].
 
 | Method | Dữ liệu → hành động → kiểm tra |
 | --- | --- |
@@ -380,11 +410,17 @@ Có **6 test method / 6 lượt**, tất cả repository đều mock. Căn cứ:
 | [refusesDeletionOfProductWithOrderHistory][pst] | Stub có lịch sử đơn. Assert ConflictException và không gọi delete. |
 | [missingProductFailsReadUpdateAndDelete][pst] | Query thường/khóa trả Optional.empty. Cả ba thao tác đọc, sửa, xóa đều ném ResourceNotFoundException. |
 
+Test tìm kiếm bổ sung:
+
+| Method | Dữ liệu → hành động → kiểm tra |
+| --- | --- |
+| [delegatesSearchAndSortedPaginationToRepository][pst] | Stub trang 1, size 2, price DESC rồi id ASC; verify gọi findAll(Specification, Pageable), metadata và DTO. Không chứng minh SQL filter đúng; phần đó được PostgreSQL IT kiểm tra. |
+
 Helper `request()` cố ý dùng tên ` Keyboard ` để kiểm tra normalize; helper `product()` tạo dữ liệu cũ có ID. Căn cứ: [ProductServiceTest helpers][pst].
 
 ### 5.6. Đọc toàn bộ `ApiControllerTest`
 
-Class `@WebMvcTest` giới hạn vào hai controller, dùng `MockMvc` và `@MockitoBean` cho hai service. Có **14 test method / 34 lượt**: ba method parameterized có 9, 8 và 6 case. Vì service bị mock, response đúng không có nghĩa DB đã thay đổi. Căn cứ: [ApiControllerTest][webtest].
+Class @WebMvcTest giới hạn vào hai controller, dùng MockMvc và @MockitoBean cho service. Có **23 test method / 72 lượt**; service bị mock nên chỉ kết luận HTTP contract/binding/validation/advice. Căn cứ: [ApiControllerTest][webtest].
 
 | Method | Request và điều được xác nhận |
 | --- | --- |
@@ -403,11 +439,25 @@ Class `@WebMvcTest` giới hạn vào hai controller, dùng `MockMvc` và `@Mock
 | [foreignKeyConflictReturns409WithoutSqlDetails][webtest] | PUT service mock ném DataIntegrityViolationException; assert 409 và message chung, không trả message SQL của exception. Không tạo FK violation thật. |
 | [unexpectedFailureReturns500WithoutInternalDetails][webtest] | Mock ném IllegalStateException chứa thông tin nội bộ. Assert 500, message chung và không có stackTrace trong JSON. Log ERROR trong test là lỗi cố ý. |
 
+Các test tìm kiếm và lifecycle bổ sung trong cùng class:
+
+| Method | Request và điều được xác nhận |
+| --- | --- |
+| [bindsSearchFiltersAndReturnsExistingPageShape][webtest] | Bind keyword/giá/stock/page/size/sort, verify query DTO và shape trang không đổi. |
+| [bindsOutOfStockFilter][webtest] | Bind inStock=false, trả trang rỗng từ stub. |
+| [invalidSearchQueriesReturn400BeforeServiceIsCalled][webtest] | 14 case kiểu dữ liệu, giá, sort và offset sai: 400, không gọi service. |
+| [overlongKeywordReturns400][webtest] | Keyword 121 ký tự: 400 trước service. |
+| [lifecycleActionsReturn200WithOrderDto][webtest] | 3 endpoint confirm/ship/deliver: trả status tương ứng trong OrderResponse 200. |
+| [missingOrderForLifecycleActionReturns404][webtest] | 3 action có service ném not-found: HTTP 404. |
+| [invalidLifecycleTransitionReturns409][webtest] | 3 action có business conflict: HTTP 409 và message. |
+| [lifecycleLockConflictReturns409WithoutSqlDetails][webtest] | 3 action có mock lock failure: HTTP 409 chung, không phải test DB timeout thật. |
+| [invalidLifecycleIdReturns400BeforeService][webtest] | 9 case ID 0/-1/abc trên ba endpoint: 400, không gọi service. |
+
 Hai helper `product()` và `order()` tạo DTO response cố định. Test đang kiểm tra contract của tầng HTTP trước những outcome đã quy định, không chạy service implementation. Căn cứ: [ApiControllerTest helpers][webtest].
 
 ### 5.7. Đọc toàn bộ `OrderManagementIT`
 
-Class dùng `@SpringBootTest`, `@AutoConfigureMockMvc`, `@Testcontainers`, không dùng repository mock. Container chạy `postgres:17-alpine`; `@DynamicPropertySource` cấp JDBC URL/user/password của container. `cleanDatabase()` chạy trước mỗi test, TRUNCATE các bảng **trong DB test cô lập**, không phải database Compose. Test không có annotation transaction bao cả test nên có thể kiểm tra commit/rollback của service sau khi method đã kết thúc. Có **12 test method / 12 lượt**. Căn cứ: [OrderManagementIT annotations, databaseProperties, cleanDatabase][it].
+Class dùng `@SpringBootTest`, `@AutoConfigureMockMvc`, `@Testcontainers`, không dùng repository mock. Container chạy `postgres:17-alpine`; `@DynamicPropertySource` cấp JDBC URL/user/password của container. `cleanDatabase()` chạy trước mỗi test, TRUNCATE các bảng **trong DB test cô lập**, không phải database Compose. Test không có annotation transaction bao cả test nên có thể kiểm tra commit/rollback của service sau khi method đã kết thúc. Có **19 test method / 40 lượt**. Căn cứ: [OrderManagementIT annotations, databaseProperties, cleanDatabase][it].
 
 | Method | Chuẩn bị và thao tác | Chứng minh trong phạm vi nào? |
 | --- | --- | --- |
@@ -424,6 +474,18 @@ Class dùng `@SpringBootTest`, `@AutoConfigureMockMvc`, `@Testcontainers`, khôn
 | [missingResourcesAndInvalidQuantitiesHaveCorrectHttpStatuses][it] | Đọc/hủy order không tồn tại, đặt product thiếu, gửi quantity -1/0/1,000,001. | 404/400 cùng fieldErrors; order count=0 và stock=5. Validation tích hợp không làm thay đổi DB. |
 | [largeMonetaryValuesRoundTripExactlyWithoutOverflow][it] | Giá 999999999999.99 mua 1,000,000 và giá 0.10 mua 3; đọc lại DTO và SQL tổng. | Giá trị 999999999999990000.30 giữ chính xác trong BigDecimal/NUMERIC; kiểm tra biên lớn đã chọn, không phải mọi miền giá trị có thể. |
 
+Các scenario lifecycle bổ sung trong cùng class:
+
+| Method | Chuẩn bị và thao tác | Chứng minh trong phạm vi nào? |
+| --- | --- | --- |
+| [fulfillmentLifecyclePersistsWithoutFurtherStockOrMoneyChanges][it] | Confirm → ship → deliver qua HTTP và DB thật. | State persist từng bước; stock không trừ thêm, snapshot tiền/items/createdAt không đổi. So với snapshot đã persist để tôn trọng độ chính xác microsecond PostgreSQL. |
+| [invalidLifecycleActionReturns409AndLeavesDatabaseUnchanged][it] | 16 action sai, kể cả cancel trùng/terminal. | HTTP 409, đọc lại order và stock không đổi. |
+| [concurrentDuplicateLifecycleActionsHaveOneSuccessAndOneConflict][it] | 3 case confirm/ship/deliver lặp đồng thời, quan sát chờ order lock. | Một success, một conflict, stock giữ nguyên. |
+| [concurrentConfirmAndCancelRespectTheCommittedWinner][it] | 2 case chủ động cho confirm hoặc cancel giữ lock/commit trước. | Request còn lại chờ lock rồi 409; stock lần lượt 7 hoặc 10. |
+| [concurrentAdjacentActionsCanBothSucceedInValidSerialOrder][it] | Confirm trước ship, hoặc ship trước deliver. | Request sau chờ lock rồi cùng success theo rule; không trừ thêm kho. |
+| [failedLifecycleWriteRollsBackAndCanBeRetried][it] | 3 case trigger test từ chối UPDATE status, dọn trong finally. | Service proxy phát lỗi ở flush/commit; state trước giữ nguyên và retry thành công sau khi tháo trigger. |
+| [lifecycleMigrationUpgradesV2WithoutChangingExistingOrdersOrInventory][it] | Schema test riêng migrate tới V2, seed CREATED/CANCELLED, rồi migrate V3. | Order/item/stock cũ giữ nguyên, chấp nhận CONFIRMED và vẫn từ chối giá trị PAID. Không dùng schema production. |
+
 **Các helper cần hiểu để trả lời sâu:**
 
 - `product()`/`request()` tạo fixture bằng service thật và DTO. `databaseProperties()` cung cấp connection tới container. Căn cứ: [OrderManagementIT][it].
@@ -434,15 +496,38 @@ Class dùng `@SpringBootTest`, `@AutoConfigureMockMvc`, `@Testcontainers`, khôn
 
 ### 5.8. Test nào thật sự chứng minh rollback/concurrency?
 
-**Rollback sau khi đã có write:** `persistenceFailureRollsBackInventoryDeduction`, và rollback nghiệp vụ cancel: `failedCancellationRollsBackOrderStatusAndEveryStockChange`. Chúng gây lỗi SQL và đọc lại state qua transaction/query sau lỗi. Căn cứ: [OrderManagementIT][it].
+**Rollback SQL:** persistenceFailureRollsBackInventoryDeduction và failedCancellationRollsBackOrderStatusAndEveryStockChange kiểm tra nguyên tử của order/stock. failedLifecycleWriteRollsBackAndCanBeRetried gây lỗi UPDATE status cho cả ba action và đọc lại state sau rollback. Căn cứ: [OrderManagementIT][it].
 
-**Chờ khóa và kết quả cạnh tranh thật:** `concurrentOrdersCannotOversellLastUnit` và `concurrentCancellationRestoresStockOnlyOnce` quan sát PostgreSQL wait trước commit. Test reversed-items bổ sung một scenario kiểm tra thứ tự khóa; unit test `inOrder(...)` chỉ kiểm tra thứ tự gọi mock. Căn cứ: [IT][it], [unit test inOrder][ost].
+**Chờ khóa thật:** Hai test overlap cũ kiểm tra overselling và cancel trùng; ba test lifecycle concurrency mới kiểm tra duplicate action, hai chiều confirm–cancel và adjacent actions. Tất cả dùng pg_stat_activity để xác nhận wait trước commit. Reversed-items chỉ là regression scenario; unit inOrder chỉ kiểm tra mock. Căn cứ: [OrderManagementIT][it], [OrderServiceTest][ost].
 
-**Không được nói:** “67 test đều là unit test”, “mock rollback được chứng minh”, “không còn bất kỳ deadlock nào”, “đã load test hàng nghìn user” hoặc “đạt 100% coverage”. Source chỉ cho thấy 21 lượt Mockito service test, 34 lượt MVC slice và 12 IT; không có benchmark/coverage configuration trong pom. Căn cứ: [bốn test class][ost], [ProductServiceTest][pst], [ApiControllerTest][webtest], [OrderManagementIT][it], [pom.xml][pom].
+**Không suy diễn:** 217 lượt gồm 88 unit, 72 MVC slice và 57 PostgreSQL IT; không phải tất cả đều chứng minh database. Không có kết luận mọi interleaving đều không deadlock, 100% coverage hay throughput production. Căn cứ: [OrderStatusTest][statustest], [OrderServiceTest][ost], [ProductServiceTest][pst], [ProductSearchQueryTest][searchquerytest], [ApiControllerTest][webtest], [OrderManagementIT][it], [ProductSearchIT][searchit], [pom.xml][pom].
 
 **Trả lời ngắn:** “Em có unit test cho quyết định nghiệp vụ, nhưng em không dùng mock để kết luận transaction đúng. Hai SQL-failure test kiểm tra rollback với PostgreSQL, và hai overlap test quan sát request thực sự chờ row lock. Đây là bằng chứng cho các kịch bản được test, không phải benchmark hay lời bảo đảm mọi tình huống.” [Integration test][it].
 
-Lệnh chạy lại: `mvnw.cmd test` cho service/MVC test, `mvnw.cmd verify -Pintegration` cho cả PostgreSQL IT khi Docker hoạt động. Surefire chạy `*Test`, Failsafe profile integration chạy `*IT`; CI hiện mới được cấu hình, không suy ra đã chạy GitHub Actions. Căn cứ: [pom.xml][pom], [workflow][ci].
+Lệnh chạy lại: `mvnw.cmd test` cho service/MVC test, `mvnw.cmd verify -Pintegration` cho cả PostgreSQL IT khi Docker hoạt động. Surefire chạy `*Test`, Failsafe profile integration chạy `*IT`; CI được cấu hình chạy cùng profile; kết quả local không thay cho việc xem kết quả GitHub Actions. Căn cứ: [pom.xml][pom], [workflow][ci].
+
+### 5.9. Các test domain và tìm kiếm đã bổ sung
+
+OrderStatusTest có một method acceptsOnlyTheFourBusinessTransitions với 25 cặp source/target: chỉ bốn cạnh được chấp nhận, bao gồm từ chối SHIPPED → CREATED và mọi cạnh ra khỏi hai state kết thúc. Đây là unit test thuần Java, không Spring/DB. Căn cứ: [OrderStatusTest.transitionMatrix][statustest].
+
+ProductSearchQueryTest có 7 method/23 lượt: preservesDefaultsAndNormalizesKeyword (mặc định/trim/giá 0), supportsWhitelistedSortFieldsWithUniqueTieBreaker (4 field), omittedDirectionMeansAscending, rejectsUnsupportedOrMalformedSort (9 case), rejectsInvalidPageBounds (4 case, gồm offset vượt int), rejectsNegativeOrReversedPriceBounds (3 case), rejectsOverlongKeyword. Chúng kiểm tra input và Pageable, không chứng minh SQL. Căn cứ: [ProductSearchQueryTest][searchquerytest].
+
+ProductSearchIT có 10 method/17 lượt, dùng PostgreSQL thật:
+
+| Method | Điều kiểm tra |
+| --- | --- |
+| searchesNameCaseInsensitivelyAndCombinesEveryFilter | Tên không phân biệt hoa thường, AND mọi filter; không tìm description. |
+| appliesEachPriceBoundIndependentlyAndIncludesExactDecimalBoundaries | Min/max riêng, hai biên bao gồm, scale BigDecimal không làm sai so sánh. |
+| distinguishesAvailableUnavailableAndOmittedStockFilter | true > 0, false = 0, omitted lấy cả hai. |
+| missingAndBlankFiltersPreserveOldDefaults | GET cũ giữ size/order/shape, keyword trắng không lọc. |
+| keywordIsLiteralIncludingLikeMetacharactersAndSqlSyntax | 5 case %, _, !, backslash và text trông như SQL được tìm như ký tự thường. |
+| filtersBeforePagingAndCountsOnlyMatchingRowsWithStableTies | Trang đã lọc, tie ID ổn định, SQL có WHERE/order/offset/fetch và count đã lọc. |
+| unmatchedAndOutOfRangePagesAreEmptyButKeepCorrectTotals | Không khớp hoặc page quá cuối: rỗng, tổng đúng. |
+| everyAllowedSortExecutesAgainstPostgresqlInBothDirections | 4 field chạy cả ASC/DESC trên DB. |
+| invalidFiltersReturn400WithRealServiceAndDatabase | Query sai bị từ chối bởi HTTP pipeline thật. |
+| selectivePriceQueryUsesMigratedIndexAndDatabaseLimitOnRepresentativeData | 20.000 fixture, ANALYZE, EXPLAIN SQL JPA thật; index price/id được chọn, ghi plan ở target. Không phải benchmark throughput. |
+
+Căn cứ cho toàn bộ bảng: [ProductSearchIT][searchit], [ProductSpecifications][specifications], [ProductSearchQuery][searchquery].
 
 <a id="phan-6"></a>
 
@@ -511,9 +596,9 @@ Các request/response dùng Java record nên có constructor/accessor/equals/has
 
 ### 6.7. Enum
 
-**Nền tảng và ví dụ:** Enum mô tả tập giá trị hữu hạn, tránh string tùy ý. OrderStatus chỉ có CREATED/CANCELLED; `@Enumerated(EnumType.STRING)` lưu tên vào DB. Không phải ordinal 0/1, nên đổi thứ tự khai báo enum không tự đổi ý nghĩa dữ liệu như ordinal; nhưng đổi tên enum vẫn cần xem lại dữ liệu/migration. Căn cứ: [OrderStatus][status], [CustomerOrder.status][order], [DB CHECK status][schema].
+**Nền tảng và ví dụ:** Enum mô tả tập giá trị hữu hạn: CREATED, CONFIRMED, SHIPPED, DELIVERED, CANCELLED. EnumType.STRING lưu tên, không lưu ordinal; đổi tên vẫn cần xem dữ liệu/migration. Enum hiện còn có canTransitionTo dùng switch để định nghĩa bốn cạnh hợp lệ. V3 mở rộng CHECK, còn entity gọi rule trước khi mutate. Căn cứ: [OrderStatus][status], [CustomerOrder][order], [V3][schemalifecycle].
 
-**Trả lời ngắn:** “Em dùng enum cho trạng thái và lưu dạng STRING để dữ liệu dễ đọc, không phụ thuộc thứ tự enum. Hiện chỉ có tạo và hủy; em không nhận đã triển khai paid, shipped hay state machine thanh toán.” [Enum][status], [cancel rule][order].
+**Trả lời ngắn:** “Em dùng năm enum value cho lifecycle, lưu dạng STRING và định nghĩa canTransitionTo trong enum. Entity bảo vệ rule; service khóa row order trước khi gọi entity. Chỉ CREATED được hủy; giao hàng không trừ kho thêm. Đây là fulfillment state, chưa có thanh toán hay carrier API.” [Enum][status], [domain][order], [service][os], [controller][oc].
 
 ### 6.8. Optional
 
@@ -629,11 +714,11 @@ Thời lượng là mục tiêu luyện nói, phụ thuộc tốc độ của b�
 
 #### Q23. Phân trang của em được thực hiện ở đâu?
 
-“Em thực hiện phân trang ở truy vấn database, không load tất cả rồi cắt List bằng Java. Controller nhận page và size, kiểm tra page không âm và size từ 1 đến 100. Service tạo PageRequest và sort ID tăng dần, repository trả Page<Product>. Em map content sang ProductResponse rồi xuất metadata qua PageResponse generic. Page có tổng số bản ghi nên framework có thể cần count query; em không giả định mỗi request luôn chạy đúng hai SQL vì còn tối ưu. Hiện đây là offset pagination; sort ổn định giúp dễ dùng nhưng nếu dữ liệu thay đổi giữa các trang thì không có snapshot xuyên suốt nhiều request.” Căn cứ: [ProductController.findAll][pc], [ProductService.findAll][ps], [PageResponse][page].
+“Em truyền Specification và Pageable cho database lọc rồi phân trang. ProductSearchQuery kiểm tra keyword/giá/stock, page, size và sort; mặc định id tăng dần, sort khác thêm ID để xử lý tie. Service map trang sang DTO, metadata đếm kết quả đã lọc. Framework có thể bỏ count khi suy ra total từ trang thiếu. PostgreSQL IT kiểm tra SQL và kết quả, còn unit chỉ kiểm tra input và lời gọi repository. Offset pagination vẫn có hạn chế khi dữ liệu thay đổi giữa các request.” Căn cứ: [ProductSearchQuery][searchquery], [ProductSpecifications][specifications], [ProductService][ps], [ProductSearchIT][searchit].
 
 #### Q24. Unit Test và Integration Test của em khác nhau thế nào?
 
-“Service unit test dùng JUnit và Mockito để cô lập nghiệp vụ với repository mock. Chúng kiểm tra tiền, quantity, thiếu hàng, trùng ID, cancel và thứ tự tương tác. Controller slice dùng MockMvc nhưng service bị mock, nên kiểm tra HTTP contract và validation. Integration test khởi động Spring context, dùng PostgreSQL Testcontainers cùng repository thật để kiểm tra mapping, commit/rollback và concurrency. MockMvc trong IT vẫn không đi qua socket mạng; nó kiểm tra HTTP pipeline nội bộ cùng backend thật. Em có 67 lượt test trong báo cáo đã chạy trước đó, gồm 21 service unit, 34 MVC slice và 12 IT; em không gọi tất cả chúng là unit test.” Căn cứ: [OrderServiceTest][ost], [ProductServiceTest][pst], [ApiControllerTest][webtest], [IT][it], [review][review].
+“Unit test cô lập rule và service; Mockito repository không mở transaction hoặc khóa DB. MVC slice mock service để kiểm tra HTTP/validation. PostgreSQL Testcontainers chạy Spring backend thật để kiểm tra SQL, commit/rollback và concurrency. Hiện có 217 lượt: 88 unit, 72 MVC slice và 57 IT. MockMvc trong IT vẫn không đi qua socket; số lượt test không phải coverage hay số request/giây.” Căn cứ: [OrderServiceTest][ost], [OrderStatusTest][statustest], [ProductServiceTest][pst], [ProductSearchQueryTest][searchquerytest], [ApiControllerTest][webtest], [OrderManagementIT][it], [ProductSearchIT][searchit].
 
 #### Q25. @Mock và @InjectMocks có tạo transaction cho test không?
 
@@ -697,9 +782,9 @@ Không. Đây là view không cho caller thêm/xóa phần tử qua list đó, k
 
 OrderResponse dùng unitPrice/subtotal đã lưu trong OrderItem và totalAmount của CustomerOrder, không tính lại từ Product.price. Response chỉ có productId, không có productName. Truy cập ID của JPA proxy thường không cần tải toàn bộ product; không nên khẳng định mỗi item chắc chắn có thêm SELECT product nếu chưa quan sát SQL. Căn cứ: [OrderItem constructor][item], [OrderResponse.from][oresp], [IT price snapshot][it].
 
-#### D10. Vì sao source chỉ có 43 test method nhưng báo cáo là 67 test?
+#### D10. Vì sao số lượt test lớn hơn số method Java?
 
-Parameterized test chạy nhiều lần theo dữ liệu. OrderServiceTest có 11 method, quantity chạy 5 case nên 15 lượt. ProductServiceTest có 6 lượt. MVC có 14 method, ba method chạy 9/8/6 case thay vì mỗi method một lần nên tổng 34. IT có 12 lượt. Cộng thành 67, không phải có 67 method Java hoặc 67 phép kiểm thử độc lập đối với database. Căn cứ: [OrderServiceTest annotations][ost], [ProductServiceTest][pst], [ApiControllerTest annotations][webtest], [OrderManagementIT][it], [record review][review].
+Một method parameterized chạy nhiều invocation. Ví dụ OrderStatusTest chỉ có một method nhưng kiểm tra 25 cặp trạng thái; OrderServiceTest có 13 method và 33 lượt do quantity/valid/invalid transition chạy nhiều dữ liệu. Báo cáo hiện có 217 lượt trên 7 class; đọc XML Surefire/Failsafe để biết kết quả chạy, không đếm method rồi suy ra tất cả pass. Căn cứ: [OrderStatusTest][statustest], [OrderServiceTest][ost], [README Testing](README.md#testing), [pom.xml][pom].
 
 ### 7.3. Năm điểm có thể cải thiện — chưa triển khai
 
@@ -713,11 +798,11 @@ Parameterized test chạy nhiều lần theo dữ liệu. OrderServiceTest có 1
 
 ### 7.4. Giới thiệu project trong khoảng 60 giây
 
-“Em xây dựng Order Management API bằng Java 21, Spring Boot và PostgreSQL. Project có CRUD sản phẩm, phân trang, tạo đơn nhiều sản phẩm và hủy đơn để hoàn kho. Em chia code thành controller, service và repository; API nhận/trả DTO, có validation và xử lý lỗi tập trung.
+“Em xây dựng Order Management API bằng Java 21, Spring Boot và PostgreSQL. Project có CRUD/tìm kiếm sản phẩm, phân trang, tạo đơn nhiều sản phẩm và confirm/ship/deliver; chỉ hủy từ CREATED mới hoàn kho. Em chia code thành controller, service và repository; API nhận/trả DTO, có validation và xử lý lỗi tập trung.
 
 Điểm em tập trung là tính nhất quán tồn kho. Khi tạo đơn, service lấy pessimistic write lock trên product theo ID tăng dần, kiểm tra toàn bộ stock rồi mới trừ kho và lưu đơn trong một transaction. Khi hủy, em khóa order để tránh hoàn kho hai lần. Tiền được tính bằng BigDecimal và giá lúc đặt hàng được giữ trong item.
 
-Về kiểm thử, em có unit test Mockito và integration test PostgreSQL/Testcontainers. Báo cáo review ghi nhận 67 lượt pass, gồm các test SQL rollback và chờ khóa thực tế. Project hiện chưa có đăng nhập, thanh toán hoặc số liệu hiệu năng production; em có thể trình bày rõ giới hạn đó.”
+Về kiểm thử, em có unit test Mockito và integration test PostgreSQL/Testcontainers. Lần chạy local mới ghi nhận 217 lượt pass, gồm SQL rollback, chờ row lock và hai chiều confirm–cancel. Project hiện chưa có đăng nhập, thanh toán hoặc số liệu hiệu năng production; em có thể trình bày rõ giới hạn đó.”
 
 Căn cứ cho nội dung giới thiệu: [controllers][pc], [OrderController][oc], [OrderService][os], [OrderItem][item], [test PostgreSQL][it], [dependencies][pom], [review][review]. Thời gian cần luyện đọc thực tế, không coi số giây là kết quả đã đo.
 
@@ -733,7 +818,9 @@ Phần em chú trọng nhất là concurrency. Nếu chỉ đọc stock rồi tr
 
 Khi hủy đơn, em khóa order trước để hai request không cùng thấy CREATED rồi hoàn kho hai lần. Sau đó service kiểm tra trạng thái, khóa product, kiểm tra overflow, hoàn kho và chuyển CANCELLED. Lần hủy sau trả 409. Xóa product đã có lịch sử đơn cũng bị từ chối để giữ tham chiếu. Căn cứ: [OrderRepository][or], [OrderService.cancel][os], [Product.restoreStock][product], [ProductService.delete][ps].
 
-Về test, Mockito giúp em kiểm tra rule nghiệp vụ nhanh nhưng không chứng minh transaction. Em dùng PostgreSQL Testcontainers để gây lỗi stock UPDATE sau khi đã INSERT đơn và kiểm tra DB rollback. Với concurrency, test giữ transaction đầu, nhìn pg_stat_activity để xác nhận request thứ hai thật sự chờ lock, rồi mới cho commit. Báo cáo hiện có 67 lượt test pass; em không coi đó là coverage hay benchmark. Căn cứ: [unit tests][ost], [integration tests][it], [review][review].
+Lifecycle còn có CREATED → CONFIRMED → SHIPPED → DELIVERED. Mỗi action khóa order trước khi kiểm tra, không trừ stock thêm. Confirm và cancel cạnh tranh thì chỉ nhánh hợp lệ theo trạng thái đã commit được tiếp tục; hai action liền nhau có thể cùng thành công nếu đúng thứ tự. Căn cứ: [OrderStatus][status], [OrderService][os], [test lifecycle concurrency][it].
+
+Về test, Mockito giúp em kiểm tra rule nghiệp vụ nhanh nhưng không chứng minh transaction. Em dùng PostgreSQL Testcontainers để gây lỗi stock UPDATE sau khi đã INSERT đơn và kiểm tra DB rollback. Với concurrency, test giữ transaction đầu, nhìn pg_stat_activity để xác nhận request thứ hai thật sự chờ lock, rồi mới cho commit. Lần chạy local hiện có 217 lượt test pass; em không coi đó là coverage hay benchmark. Căn cứ: [unit tests][ost], [integration tests][it], [review][review].
 
 Project chưa có authentication, authorization, payment hoặc idempotency key. Nếu có yêu cầu phát triển tiếp, em sẽ ưu tiên làm rõ contract cập nhật stock, retry tạo đơn và quyền truy cập resource. Em sẵn sàng mở source để trace từng bước và nói rõ điều nào được unit test kiểm tra, điều nào đã có bằng chứng database thật.” Căn cứ hiện trạng: [pom.xml][pom], [ProductService.update][ps], [OrderController][oc], [schema][schema].
 
@@ -809,7 +896,7 @@ Giả sử Product có stock 10, order mua 3 đã commit nên stock hiện tại
 | --- | --- | --- |
 | 1 | [OrderController.java][oc] — `cancel()` | Nhận ID dương từ path; gọi service bean. |
 | 2 | [OrderService.java][os] — `cancel()`; [OrderRepository][or] — `findByIdForUpdate()` | Transaction ghi khóa row order trước. Không có order → ResourceNotFoundException. |
-| 3 | [CustomerOrder.java][order] — `ensureCancellable()` | Chỉ tiếp tục nếu CREATED; đã CANCELLED thì ném ConflictException trước khi hoàn kho. |
+| 3 | [CustomerOrder.java][order] — `ensureCancellable()` | Chỉ tiếp tục nếu CREATED; CONFIRMED/SHIPPED/DELIVERED hoặc đã CANCELLED đều nhận ConflictException trước khi khóa/hoàn product. |
 | 4 | [OrderService.java][os] — đọc `order.getItems()`, build TreeMap | Lấy productId và quantity đã lưu ở item, tạo thứ tự product tăng dần. |
 | 5 | [OrderService.java][os] — `lockProducts()`; [ProductRepository][pr] | Load và khóa các product cần hoàn stock trong cùng transaction. |
 | 6 | [Product.java][product] — `ensureStockCanBeRestored()` | Kiểm tra mọi product có thể cộng lại mà không vượt Integer.MAX_VALUE; dùng phép cộng long để tránh overflow khi kiểm tra. |
@@ -851,6 +938,26 @@ Căn cứ nội dung response: [Product message][product], [handler][advice], [A
 
 **Trả lời ngắn khi trace:** “Quantity=2 hợp lệ về đầu vào nhưng có thể vượt stock trong DB. Sau khi khóa product, service kiểm tra và ném conflict trước khi mutate. Proxy kết thúc transaction, advice trả 409; không có đơn hoặc tồn kho dở dang.” [Request][oreq], [service][os], [product guard][product], [advice][advice].
 
+### 8.6. Trace Confirm → Ship → Deliver và cuộc đua với Cancel
+
+Ví dụ order mua 3 từ stock 10 đã commit ở CREATED, stock còn 7. HTTP client gọi POST /api/orders/{id}/confirm, sau đó /ship, /deliver; không có body hoặc total do client gửi. Căn cứ: [OrderController][oc], [requests.http][requests].
+
+| Bước | File, class, method | Hành vi |
+| --- | --- | --- |
+| 1 | OrderController.confirm/ship/deliver | Validate ID dương rồi gọi service bean tương ứng. |
+| 2 | OrderService.confirm/ship/deliver | Spring proxy mở transaction ghi, gọi private findForUpdate. |
+| 3 | OrderRepository.findByIdForUpdate | PESSIMISTIC_WRITE trên row order; thiếu order → 404; cạnh tranh → chờ lock. |
+| 4 | CustomerOrder.confirm/ship/deliver → transitionTo → ensureTransitionAllowed | OrderStatus.canTransitionTo kiểm tra đúng cạnh; sai → ConflictException/409 trước mutate. |
+| 5 | CustomerOrder.status; OrderResponse.from | Đổi enum, map DTO trong transaction; không gọi deductStock/restoreStock. |
+| 6 | Transaction interceptor / Hibernate | Dirty checking flush UPDATE status, commit rồi mới giải phóng lock; lỗi SQL → rollback. |
+| 7 | Controller / GlobalExceptionHandler | Thành công 200, lỗi state 409, not-found 404; response giữ items/total/createdAt. |
+
+Căn cứ các bước: [OrderController][oc], [OrderService][os], [OrderRepository][or], [CustomerOrder][order], [OrderStatus][status], [OrderResponse][oresp], [advice][advice]; kết quả persist/rollback được kiểm tra bởi fulfillmentLifecyclePersistsWithoutFurtherStockOrMoneyChanges và failedLifecycleWriteRollsBackAndCanBeRetried trong [OrderManagementIT][it].
+
+Nếu confirm commit trước, cancel đang chờ khóa order sẽ đọc CONFIRMED và dừng trước productRepository, stock vẫn 7. Nếu cancel commit trước, confirm đọc CANCELLED và dừng, stock về 10 đúng một lần. Hai IT case giữ transaction đầu bằng latch, quan sát pg_stat_activity.wait_event_type=Lock, rồi cho commit và kiểm tra DB. Không dùng sleep một mình làm bằng chứng. Căn cứ: [concurrentConfirmAndCancelRespectTheCommittedWinner / overlapTransactions][it].
+
+**Trả lời ngắn khi trace:** “Request qua controller vào public transactional service, lấy khóa order rồi mới kiểm tra enum transition. Chỉ cập nhật status và map DTO; flush/commit ghi DB. Các request sau quyết định theo state đã commit, còn stock chỉ thay ở create hoặc cancel hợp lệ.” [OrderService][os], [CustomerOrder][order], [test DB thật][it].
+
 ## Bản đồ source để mở nhanh khi luyện nói
 
 | Muốn chứng minh điều gì? | Mở file/method |
@@ -862,7 +969,7 @@ Căn cứ nội dung response: [Product message][product], [handler][advice], [A
 | Entity, giá, trạng thái, quantity, tiền | [Product][product], [CustomerOrder][order], [OrderItem][item], [OrderStatus][status] |
 | Mapping response, generics | [ProductResponse][presp], [OrderResponse][oresp], [PageResponse][page] |
 | Exception và JSON lỗi | [GlobalExceptionHandler][advice], [ApiError][apierror], [BadRequestException][bad], [ConflictException][conflict], [ResourceNotFoundException][notfound] |
-| Quan hệ/ràng buộc DB | [Migration V1][schema] |
+| Quan hệ/ràng buộc DB | [Migration V1][schema], [Migration V3 lifecycle][schemalifecycle] |
 | Bằng chứng test | [OrderServiceTest][ost], [ProductServiceTest][pst], [ApiControllerTest][webtest], [OrderManagementIT][it] |
 | Cách chạy, không hardcode password | [Compose][compose], [Dockerfile][docker], [.env.example][env], [load-env.ps1][loadenv], [run-local.ps1][runlocal] |
 | Demo request và CI | [requests.http][requests], [workflow][ci] |
@@ -904,3 +1011,10 @@ Căn cứ nội dung response: [Product message][product], [handler][advice], [A
 [requests]: requests.http
 [ci]: .github/workflows/ci.yml
 [review]: REVIEW.md
+
+[schemalifecycle]: src/main/resources/db/migration/V3__extend_order_lifecycle_statuses.sql
+[statustest]: src/test/java/com/example/ordermanagement/order/OrderStatusTest.java
+[searchquerytest]: src/test/java/com/example/ordermanagement/product/ProductSearchQueryTest.java
+[searchit]: src/test/java/com/example/ordermanagement/integration/ProductSearchIT.java
+[searchquery]: src/main/java/com/example/ordermanagement/product/ProductSearchQuery.java
+[specifications]: src/main/java/com/example/ordermanagement/product/ProductSpecifications.java
