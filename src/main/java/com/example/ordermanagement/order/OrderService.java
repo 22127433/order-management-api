@@ -2,6 +2,8 @@ package com.example.ordermanagement.order;
 
 import com.example.ordermanagement.common.BadRequestException;
 import com.example.ordermanagement.common.ResourceNotFoundException;
+import com.example.ordermanagement.inventory.StockMovement;
+import com.example.ordermanagement.inventory.StockMovementRepository;
 import com.example.ordermanagement.product.Product;
 import com.example.ordermanagement.product.ProductRepository;
 import java.util.Map;
@@ -14,10 +16,13 @@ import org.springframework.transaction.annotation.Transactional;
 public class OrderService {
     private final OrderRepository orderRepository;
     private final ProductRepository productRepository;
+    private final StockMovementRepository stockMovementRepository;
 
-    public OrderService(OrderRepository orderRepository, ProductRepository productRepository) {
+    public OrderService(OrderRepository orderRepository, ProductRepository productRepository,
+                        StockMovementRepository stockMovementRepository) {
         this.orderRepository = orderRepository;
         this.productRepository = productRepository;
+        this.stockMovementRepository = stockMovementRepository;
     }
 
     @Transactional
@@ -45,12 +50,17 @@ public class OrderService {
         quantities.forEach((id, quantity) -> products.get(id).ensureStockAvailable(quantity));
 
         CustomerOrder order = CustomerOrder.create();
+        Map<Long, Integer> stockBefore = new TreeMap<>();
         quantities.forEach((id, quantity) -> {
             Product product = products.get(id);
+            stockBefore.put(id, product.getStockQuantity());
             product.deductStock(quantity);
             order.addItem(product, quantity);
         });
-        return OrderResponse.from(orderRepository.save(order));
+        CustomerOrder saved = orderRepository.save(order);
+        quantities.forEach((id, quantity) -> stockMovementRepository.save(
+                StockMovement.deduction(products.get(id), saved, quantity, stockBefore.get(id))));
+        return OrderResponse.from(saved);
     }
 
     public OrderResponse getById(Long id) {
@@ -88,7 +98,12 @@ public class OrderService {
         order.getItems().forEach(item -> quantities.put(item.getProduct().getId(), item.getQuantity()));
         Map<Long, Product> products = lockProducts(quantities);
         quantities.forEach((productId, quantity) -> products.get(productId).ensureStockCanBeRestored(quantity));
-        quantities.forEach((productId, quantity) -> products.get(productId).restoreStock(quantity));
+        quantities.forEach((productId, quantity) -> {
+            Product product = products.get(productId);
+            int before = product.getStockQuantity();
+            product.restoreStock(quantity);
+            stockMovementRepository.save(StockMovement.cancellation(product, order, quantity, before));
+        });
         order.cancel();
         return OrderResponse.from(order);
     }

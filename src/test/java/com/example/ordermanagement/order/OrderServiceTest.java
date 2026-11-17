@@ -5,6 +5,7 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
@@ -12,6 +13,9 @@ import static org.mockito.Mockito.when;
 import com.example.ordermanagement.common.BadRequestException;
 import com.example.ordermanagement.common.ConflictException;
 import com.example.ordermanagement.common.ResourceNotFoundException;
+import com.example.ordermanagement.inventory.StockMovement;
+import com.example.ordermanagement.inventory.StockMovementRepository;
+import com.example.ordermanagement.inventory.StockMovementType;
 import com.example.ordermanagement.product.Product;
 import com.example.ordermanagement.product.ProductRepository;
 import java.math.BigDecimal;
@@ -24,6 +28,7 @@ import org.junit.jupiter.params.provider.CsvSource;
 import org.junit.jupiter.params.provider.NullSource;
 import org.junit.jupiter.params.provider.ValueSource;
 import org.mockito.InjectMocks;
+import org.mockito.ArgumentCaptor;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -32,6 +37,7 @@ import org.springframework.test.util.ReflectionTestUtils;
 class OrderServiceTest {
     @Mock private OrderRepository orderRepository;
     @Mock private ProductRepository productRepository;
+    @Mock private StockMovementRepository stockMovementRepository;
     @InjectMocks private OrderService service;
 
     @Test
@@ -59,6 +65,14 @@ class OrderServiceTest {
         var lockOrder = inOrder(productRepository);
         lockOrder.verify(productRepository).findByIdForUpdate(1L);
         lockOrder.verify(productRepository).findByIdForUpdate(2L);
+        ArgumentCaptor<StockMovement> movements = ArgumentCaptor.forClass(StockMovement.class);
+        verify(stockMovementRepository, times(2)).save(movements.capture());
+        assertThat(movements.getAllValues()).extracting(StockMovement::getType)
+                .containsOnly(StockMovementType.ORDER_DEDUCTION);
+        assertThat(movements.getAllValues()).extracting(StockMovement::getQuantityDelta).containsExactly(-3, -2);
+        assertThat(movements.getAllValues()).extracting(StockMovement::getStockBefore).containsExactly(10, 5);
+        assertThat(movements.getAllValues()).extracting(StockMovement::getStockAfter).containsExactly(7, 3);
+        assertThat(movements.getAllValues()).allSatisfy(m -> assertThat(m.getReferenceOrder().getId()).isEqualTo(10L));
     }
 
     @Test
@@ -132,6 +146,12 @@ class OrderServiceTest {
         assertThat(result.totalAmount()).isEqualByComparingTo("31.00");
         assertThat(first.getStockQuantity()).isEqualTo(10);
         assertThat(second.getStockQuantity()).isEqualTo(10);
+        ArgumentCaptor<StockMovement> movements = ArgumentCaptor.forClass(StockMovement.class);
+        verify(stockMovementRepository, times(2)).save(movements.capture());
+        assertThat(movements.getAllValues()).extracting(StockMovement::getType)
+                .containsOnly(StockMovementType.ORDER_CANCELLATION);
+        assertThat(movements.getAllValues()).extracting(StockMovement::getStockBefore).containsExactly(8, 7);
+        assertThat(movements.getAllValues()).extracting(StockMovement::getStockAfter).containsExactly(10, 10);
         var locks = inOrder(orderRepository, productRepository);
         locks.verify(orderRepository).findByIdForUpdate(1L);
         locks.verify(productRepository).findByIdForUpdate(1L);
@@ -149,7 +169,7 @@ class OrderServiceTest {
         when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(order));
 
         assertThatThrownBy(() -> service.cancel(1L)).isInstanceOf(ConflictException.class);
-        verifyNoInteractions(productRepository);
+        verifyNoInteractions(productRepository, stockMovementRepository);
     }
 
     @Test
@@ -198,7 +218,7 @@ class OrderServiceTest {
         assertThat(result.createdAt()).isEqualTo(createdAt);
         assertThat(product.getStockQuantity()).isEqualTo(7);
         verify(orderRepository).findByIdForUpdate(1L);
-        verifyNoInteractions(productRepository);
+        verifyNoInteractions(productRepository, stockMovementRepository);
     }
 
     @ParameterizedTest
@@ -220,7 +240,7 @@ class OrderServiceTest {
         assertThat(order.getStatus()).isEqualTo(source);
         assertThat(product.getStockQuantity()).isEqualTo(7);
         verify(orderRepository).findByIdForUpdate(1L);
-        verifyNoInteractions(productRepository);
+        verifyNoInteractions(productRepository, stockMovementRepository);
     }
 
     @Test

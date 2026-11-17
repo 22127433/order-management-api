@@ -1,6 +1,9 @@
 package com.example.ordermanagement.product;
 
 import com.example.ordermanagement.common.PageResponse;
+import com.example.ordermanagement.inventory.RestockRequest;
+import com.example.ordermanagement.inventory.StockMovementQuery;
+import com.example.ordermanagement.inventory.StockMovementResponse;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Max;
 import jakarta.validation.constraints.Min;
@@ -55,6 +58,19 @@ public class ProductController {
     @PutMapping("/{id}")
     public ProductResponse update(@PathVariable @Positive Long id, @Valid @RequestBody ProductRequest request) {
         return productService.update(id, request);
+    }
+
+    @PostMapping("/{id}/restock")
+    public ProductResponse restock(@PathVariable @Positive Long id, @Valid @RequestBody RestockRequest request) {
+        return productService.restock(id, request);
+    }
+
+    @GetMapping("/{id}/stock-movements")
+    public PageResponse<StockMovementResponse> stockMovements(@PathVariable @Positive Long id,
+            @RequestParam(defaultValue = "0") @Min(0) int page,
+            @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size,
+            @RequestParam(defaultValue = "createdAt,desc") String sort) {
+        return productService.stockMovements(id, new StockMovementQuery(page, size, sort));
     }
 
     @DeleteMapping("/{id}")

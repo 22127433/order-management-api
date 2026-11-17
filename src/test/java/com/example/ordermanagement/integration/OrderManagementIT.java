@@ -95,6 +95,8 @@ class OrderManagementIT {
         assertThat(outcomes).containsExactlyInAnyOrder(true, false);
         assertThat(productService.getById(product.id()).stockQuantity()).isZero();
         assertThat(orderRepository.count()).isEqualTo(1);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM stock_movements WHERE movement_type='ORDER_DEDUCTION'", Long.class))
+                .isEqualTo(1);
     }
 
     @Test
@@ -118,6 +120,8 @@ class OrderManagementIT {
         assertThat(outcomes).containsExactlyInAnyOrder(true, false);
         assertThat(productService.getById(product.id()).stockQuantity()).isEqualTo(10);
         assertThat(orderService.getById(order.id()).status()).isEqualTo(OrderStatus.CANCELLED);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM stock_movements WHERE movement_type='ORDER_CANCELLATION'", Long.class))
+                .isEqualTo(1);
     }
 
     @Test
@@ -237,18 +241,21 @@ class OrderManagementIT {
                 .andExpect(jsonPath("$.totalElements").value(1))
                 .andExpect(jsonPath("$.size").value(1));
         mvc.perform(put("/api/products/{id}", id).contentType(MediaType.APPLICATION_JSON).content("""
-                {"name":"Updated","description":null,"price":12.50,"stockQuantity":8}
+                {"name":"Updated","description":null,"price":12.50,"stockQuantity":10}
                 """))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.price").value(12.50));
-        assertThat(productService.getById(id).stockQuantity()).isEqualTo(8);
+        assertThat(productService.getById(id).stockQuantity()).isEqualTo(10);
         assertThat(productService.getById(id).description()).isNull();
 
-        mvc.perform(delete("/api/products/{id}", id)).andExpect(status().isNoContent())
+        mvc.perform(delete("/api/products/{id}", id)).andExpect(status().isConflict());
+        // Legacy products without order references or journal entries remain deletable.
+        long legacyId = jdbc.queryForObject("INSERT INTO products(name,price,stock_quantity) VALUES ('Legacy',1,0) RETURNING id", Long.class);
+        mvc.perform(delete("/api/products/{id}", legacyId)).andExpect(status().isNoContent())
                 .andExpect(content().string(""));
-        mvc.perform(get("/api/products/{id}", id)).andExpect(status().isNotFound());
-        mvc.perform(put("/api/products/{id}", id).contentType(MediaType.APPLICATION_JSON).content(body))
+        mvc.perform(get("/api/products/{id}", legacyId)).andExpect(status().isNotFound());
+        mvc.perform(put("/api/products/{id}", legacyId).contentType(MediaType.APPLICATION_JSON).content(body))
                 .andExpect(status().isNotFound());
-        mvc.perform(delete("/api/products/{id}", id)).andExpect(status().isNotFound());
+        mvc.perform(delete("/api/products/{id}", legacyId)).andExpect(status().isNotFound());
     }
 
     @Test

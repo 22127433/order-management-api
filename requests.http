@@ -40,7 +40,7 @@ GET {{baseUrl}}/api/products?page=0&size=10
 ### 04. Get Product -> 200
 GET {{baseUrl}}/api/products/{{keyboardId}}
 
-### 05. Update Product -> 200; PUT replaces editable fields, stock is absolute
+### 05. Update Product -> 200; PUT replaces metadata and must keep current stock unchanged
 # Run before creating the order. Prices remain consistent with the README example.
 PUT {{baseUrl}}/api/products/{{keyboardId}}
 Content-Type: application/json
@@ -111,7 +111,7 @@ GET {{baseUrl}}/api/products/{{keyboardId}}
 ### 14. Delete Referenced Product -> 409, even after cancellation
 DELETE {{baseUrl}}/api/products/{{keyboardId}}
 
-### 15. Create an unused product for the successful deletion example -> 201
+### 15. Create a product with zero stock -> 201; INITIAL_STOCK history is still recorded
 # @name createUnusedProduct
 POST {{baseUrl}}/api/products
 Content-Type: application/json
@@ -123,10 +123,10 @@ Content-Type: application/json
   "stockQuantity": 0
 }
 
-### 16. Delete Unused Product -> 204, empty response body
+### 16. Delete Product With Inventory History -> 409, even when initial stock is zero
 DELETE {{baseUrl}}/api/products/{{unusedProductId}}
 
-### 17. Get Deleted Product -> 404
+### 17. Get Retained Product -> 200; deletion was refused to preserve history
 GET {{baseUrl}}/api/products/{{unusedProductId}}
 
 ### 18. Invalid Pagination -> 400
@@ -216,3 +216,36 @@ GET {{baseUrl}}/api/products/{{keyboardId}}
 
 ### 44. Confirm Previously Cancelled Order -> 409; cancelled order cannot be revived
 POST {{baseUrl}}/api/orders/{{orderId}}/confirm
+
+### 45. Manual Restock -> 200; keyboard stock 19 -> 24, journal records +5 and reason
+POST {{baseUrl}}/api/products/{{keyboardId}}/restock
+Content-Type: application/json
+
+{"quantity":5,"reason":"Supplier delivery"}
+
+### 46. Latest Inventory Movements -> 200; newest first, with product/order IDs and stock snapshots
+GET {{baseUrl}}/api/products/{{keyboardId}}/stock-movements?page=0&size=10&sort=createdAt,desc
+
+### 47. Inventory History Oldest First -> 200; INITIAL, -2, +2, -1, +5 in this sequence
+GET {{baseUrl}}/api/products/{{keyboardId}}/stock-movements?page=0&size=10&sort=createdAt,asc
+
+### 48. Invalid Restock Quantity -> 400; no inventory movement
+POST {{baseUrl}}/api/products/{{keyboardId}}/restock
+Content-Type: application/json
+
+{"quantity":0,"reason":"Invalid quantity example"}
+
+### 49. Missing Restock Reason -> 400
+POST {{baseUrl}}/api/products/{{keyboardId}}/restock
+Content-Type: application/json
+
+{"quantity":1}
+
+### 50. Invalid Inventory History Sorting -> 400
+GET {{baseUrl}}/api/products/{{keyboardId}}/stock-movements?sort=quantityDelta,desc
+
+### 51. Product PUT Cannot Replace Stock -> 409; stock and history remain unchanged
+PUT {{baseUrl}}/api/products/{{keyboardId}}
+Content-Type: application/json
+
+{"name":"Mechanical Keyboard","description":"USB keyboard","price":59.90,"stockQuantity":0}

@@ -8,7 +8,7 @@ A Java 21 and Spring Boot REST API for managing products, inventory, and orders.
 
 Clients can manage a product catalog, place orders containing multiple products, confirm/ship/deliver orders, and cancel newly created orders to restore inventory. The server calculates prices and totals, checks stock availability, and persists inventory changes together with each order in a single transaction.
 
-The project focuses on a single Spring Boot application and PostgreSQL database. It has no frontend or authentication layer. It does not include payment processing, shipping, or customer accounts.
+The project focuses on a single Spring Boot application and PostgreSQL database. It has no frontend or authentication layer. It does not include payment processing, carrier integration, or customer accounts.
 
 For a source-based walkthrough in Vietnamese, see [INTERVIEW_PREP.md](INTERVIEW_PREP.md). The engineering review and its recorded test evidence are in [REVIEW.md](REVIEW.md).
 
@@ -32,7 +32,9 @@ Dependency versions are managed by Spring Boot unless explicitly pinned in [pom.
 
 ## Features
 
-- Create, read, update, and delete products.
+- Create, read, and update products; delete legacy products only when no order or inventory history references them.
+- Restock products with a reason and record inventory movements atomically with stock changes.
+- Browse paginated stock history with initial stock, order deduction, cancellation, and manual restock entries.
 - Search product names without case sensitivity, filter by price/stock, and paginate with validated sorting.
 - Create an order with multiple distinct products.
 - Reject unavailable stock and invalid quantities before changing inventory.
@@ -60,12 +62,14 @@ Controllers validate HTTP input and return response DTOs. Services own business 
 src/main/java/com/example/ordermanagement/
   common/       Error handling and pagination DTO
   product/      Product entity, DTOs, repository, service, controller
+  inventory/    Immutable stock movement entity, DTOs, repository, history query
   order/        Order/item entities, DTOs, repositories, service, controller
 src/main/resources/
   application.yml
   db/migration/V1__create_order_management_tables.sql
   db/migration/V2__index_products_price_id.sql
   db/migration/V3__extend_order_lifecycle_statuses.sql
+  db/migration/V4__create_stock_movements.sql
 src/test/java/com/example/ordermanagement/
   product/      Mockito service tests
   order/        Mockito business tests
@@ -82,6 +86,8 @@ scripts/
 erDiagram
     products ||--o{ order_items : referenced_by
     customer_orders ||--|{ order_items : contains
+    products ||--o{ stock_movements : inventory_history
+    customer_orders o|--o{ stock_movements : optional_reference
 
     products {
         bigint id PK
@@ -106,6 +112,18 @@ erDiagram
         numeric unit_price
         numeric subtotal
     }
+
+    stock_movements {
+        bigint id PK
+        bigint product_id FK
+        varchar movement_type
+        integer quantity_delta
+        integer stock_before
+        integer stock_after
+        bigint reference_order_id FK
+        varchar reason
+        timestamptz created_at
+    }
 ```
 
 - `CustomerOrder` has one or more `OrderItem` records. Each item references exactly one order and one product.
@@ -115,6 +133,8 @@ erDiagram
 - Foreign keys and check constraints protect relationships, quantities, and monetary values. The order table is named `customer_orders` to avoid the SQL keyword `order`.
 
 See [V1](src/main/resources/db/migration/V1__create_order_management_tables.sql) for the base schema, [V2](src/main/resources/db/migration/V2__index_products_price_id.sql) for the price index, and [V3](src/main/resources/db/migration/V3__extend_order_lifecycle_statuses.sql) for the five allowed order status values. V3 replaces the status CHECK constraint without rewriting existing order or inventory data. The original migrations remain unchanged. Flyway applies migrations at startup; Hibernate validates the mapping with `ddl-auto=validate`.
+
+[V4](src/main/resources/db/migration/V4__create_stock_movements.sql) adds the inventory journal, restrictive product/order foreign keys, balance/type constraints, and indexes. It does not change existing product stock or backfill historical movements.
 
 ## API Endpoints
 
@@ -126,7 +146,9 @@ Default base URL: `http://localhost:8080`. Request and response bodies use JSON.
 | GET | `/api/products?page=0&size=20` | Search, filter, sort, and paginate products | 200 |
 | GET | `/api/products/{id}` | Get a product | 200 |
 | PUT | `/api/products/{id}` | Replace editable product fields | 200 |
-| DELETE | `/api/products/{id}` | Delete an unreferenced product | 204, empty body |
+| DELETE | `/api/products/{id}` | Delete a product without order references or inventory history | 204, empty body |
+| POST | `/api/products/{id}/restock` | Add positive stock with a reason | 200 |
+| GET | `/api/products/{id}/stock-movements` | Paginated inventory history, sorted by time | 200 |
 | POST | `/api/orders` | Create an order | 201 + `Location` |
 | GET | `/api/orders/{id}` | Get an order and its items | 200 |
 | POST | `/api/orders/{id}/confirm` | Confirm a CREATED order | 200 |
@@ -134,7 +156,40 @@ Default base URL: `http://localhost:8080`. Request and response bodies use JSON.
 | POST | `/api/orders/{id}/deliver` | Mark a SHIPPED order as delivered | 200 |
 | POST | `/api/orders/{id}/cancel` | Cancel a CREATED order and restore stock | 200 |
 
-Pagination starts at page `0`; page size must be between `1` and `100`. Products are sorted by ID ascending unless `sort` is supplied. `PUT` requires `name`, `price`, and `stockQuantity`; `description` is optional. Stock updates set an absolute quantity.
+Pagination starts at page `0`; page size must be between `1` and `100`. Products are sorted by ID ascending unless `sort` is supplied. `PUT` requires `name`, `price`, and `stockQuantity`; `description` is optional. Since V4, PUT must keep stockQuantity equal to the locked current stock; a different value returns `409`. Use restock to add stock, rather than replacing an absolute stock value and bypassing the journal.
+
+### Stock adjustment and inventory history
+
+```http
+POST /api/products/1/restock
+Content-Type: application/json
+
+{"quantity":5,"reason":"Supplier delivery"}
+```
+
+`quantity` is an integer from 1 to 2,147,483,647, and the resulting stock must remain within that range (zero remains valid as an existing stock value). `reason` is required, trimmed, nonblank, and at most 500 characters. Invalid input returns `400`, a missing product returns `404`, and stock overflow returns `409`. Success returns `200` with the updated ProductResponse. Retrying a successful restock adds stock again; no idempotency key is implemented.
+
+```http
+GET /api/products/1/stock-movements?page=0&size=20&sort=createdAt,desc
+GET /api/products/1/stock-movements?page=1&size=10&sort=createdAt,asc
+```
+
+History uses the existing PageResponse shape. Defaults are page 0, size 20, latest first. Only `createdAt` sorting is supported, with `asc` or `desc`; omitted direction means `desc`. ID is appended in the same direction to resolve timestamp ties. Page/size/offset validation matches the product list. A missing product returns `404`; an existing legacy product with no movements returns `200` with empty content. Offset pages can shift when new movements arrive.
+
+Each movement returns `id`, `productId`, `type`, signed `quantityDelta`, `stockBefore`, `stockAfter`, nullable `referenceOrderId`, nullable `reason`, and `createdAt`:
+
+| Type | Delta | Order reference | Reason |
+| --- | --- | --- | --- |
+| INITIAL_STOCK | Initial stock, including zero; before is 0 | None | None |
+| ORDER_DEDUCTION | Negative ordered quantity | Required | None |
+| ORDER_CANCELLATION | Positive restored quantity | Required | None |
+| MANUAL_RESTOCK | Positive added quantity | None | Required |
+
+New products receive an opening entry in the same transaction as product creation, even when initial stock is zero. Create-order and cancel write one movement per product in their existing transactions; fulfillment actions do not write movements. Restock locks the product before reading its stock and writes both the increment and movement in one transaction. There is no separate transaction, asynchronous writer, message broker, or application compensation step: failure rolls back stock, journal, and any order changes together.
+
+**History retention and compatibility:** movements have no update/delete API, no setters, immutable scalar snapshots, and Hibernate `@Immutable`. Product and order foreign keys use ON DELETE RESTRICT. Product DELETE returns `409` if any movement exists, including INITIAL_STOCK; therefore newly created products cannot be physically deleted. A pre-V4 product without order references or movements can still be deleted with `204`. PUT no longer changes stock directly. These intentional contract changes prevent unrecorded stock replacement and deletion of history. Direct SQL performed by a database administrator is outside the application's append-only contract; the journal is not a tamper-proof ledger.
+
+**No historical backfill:** V4 starts with an empty journal and leaves all previous stock/order data unchanged. Existing products gain entries only when future stock operations occur; their first entry may be a deduction or cancellation with the actual current before/after stock. Cancelling an old CREATED order records its reversal without inventing a past deduction. Summing journal deltas alone does not reconstruct the stock of legacy products, and this feature does not claim a complete pre-V4 audit trail. createdAt records when the movement object was created after taking the stock lock, not the transaction's commit time.
 
 ### Product Search & Filtering
 
@@ -464,7 +519,7 @@ Response: `200 OK`. Stock returns to `20` keyboards and `10` mice; the financial
 }
 ```
 
-Cancelling again returns `409 Conflict` with message `Order 1 is already cancelled`. Deleting either referenced product also returns `409`, including after cancellation. The request file creates a separate unused product to demonstrate a successful `204` deletion.
+Cancelling again returns `409 Conflict` with message `Order 1 is already cancelled`. Deleting either referenced product also returns `409`, including after cancellation. Since V4, even the separate unused product in requests.http has an INITIAL_STOCK entry, so deleting it returns `409` and reading it still returns `200`. Successful `204` deletion is limited to legacy products without order references or movement history.
 
 ### Confirm, Ship, and Deliver
 
@@ -512,24 +567,29 @@ On Linux/macOS, replace `.\mvnw.cmd` with `sh mvnw`. Surefire runs `*Test`; Fail
 
 ### Recorded verification
 
-The order-lifecycle update was compiled and packaged successfully with `clean verify -Pintegration` on **2026-11-17**, using Java 21.0.6, Maven 3.9.11, Docker Engine 27.3.1, and PostgreSQL 17.11. The local Surefire/Failsafe XML reports record:
+The inventory update was compiled and packaged successfully with `clean verify -Pintegration` on **2026-11-17**, using Java 21.0.6, Maven 3.9.11, Docker Engine 27.3.1, and PostgreSQL 17.11. The local Surefire/Failsafe XML reports record:
 
 | Suite | Test boundary | Passed |
 | --- | --- | ---: |
 | `OrderServiceTest` | JUnit 5 + Mockito; mocked repositories | 33 |
 | `OrderStatusTest` | JUnit 5; complete 25-pair transition matrix | 25 |
-| `ProductServiceTest` | JUnit 5 + Mockito; mocked repositories | 7 |
+| `ProductServiceTest` | JUnit 5 + Mockito; mocked repositories | 16 |
+| `StockMovementTest` | JUnit 5; movement snapshots, balance, and history query validation | 14 |
 | `ProductSearchQueryTest` | JUnit 5; query validation and sort contract | 23 |
 | `ApiControllerTest` | MockMvc controller slice; mocked services | 72 |
+| `InventoryControllerTest` | MockMvc controller slice; mocked product service | 24 |
 | `OrderManagementIT` | Spring context + real PostgreSQL/Testcontainers | 40 |
 | `ProductSearchIT` | Real PostgreSQL/Testcontainers; HTTP search, generated SQL, and query plans | 17 |
-| **Total** | **0 failures, 0 errors, 0 skipped** | **217** |
+| `InventoryManagementIT` | Real PostgreSQL/Testcontainers; inventory/journal atomicity, migration, constraints, and locking | 19 |
+| **Total** | **0 failures, 0 errors, 0 skipped** | **283** |
 
 Unit/controller tests cover business rules, invalid quantities, missing products, duplicates, repeated cancellation, HTTP status codes, and validation. The integration tests verify schema mapping, committed inventory changes, forced SQL failures and rollback during creation/cancellation, monetary round-trips, and concurrent inventory access. The overlap tests observe a blocked request in PostgreSQL before allowing the first transaction to commit. Mock-based tests alone do not prove database transaction behavior.
 
 Lifecycle coverage includes all 25 enum source/target pairs, valid fulfillment actions with unchanged stock/financial snapshots, every invalid action/state combination through real HTTP/service/database integration, and rollback/retry for each new action after a forced SQL failure. Concurrency tests observe duplicate confirm/ship/deliver requests waiting on the order row, both confirm-versus-cancel winner cases, and adjacent actions that succeed in valid serial order. A separate test schema is migrated to V2, populated with CREATED/CANCELLED orders, then upgraded to V3 to verify existing data is preserved and the expanded constraint is applied. These are controlled scenarios, not a proof that every possible interleaving is deadlock-free.
 
 Search tests cover case-insensitive name matching, combined/individual filters, exact inclusive decimal bounds, true/false/omitted stock filters, literal SQL metacharacters, default compatibility, every supported sort, deterministic ties, filtered totals, empty/out-of-range pages, and invalid inputs. `ProductSearchIT` verifies that generated JPA SQL contains filtering, ordering, database pagination, and a filtered count, and checks the new price index on a 20,000-row fixture.
+
+Inventory tests verify all four movement types, references/reasons/snapshots, chronological pagination with timestamp ties, PUT/delete protections, SQL constraints, and V3→V4 migration without backfill. Forced movement INSERT failures cover product creation, order creation, cancellation, and restock; forced stock UPDATE failures verify journal inserts roll back too. Multi-product tests fail the second movement after the first was inserted. Overlap tests observe product lock waits for restock versus restock/order/cancel and an integer-overflow race; stock and movement chains remain consistent. Existing overselling and duplicate-cancellation tests now also assert that only one corresponding movement is committed. Mock tests do not establish these database guarantees.
 
 These are recorded local results; check GitHub Actions separately for CI results. The [CI workflow](.github/workflows/ci.yml) is configured to run `verify -Pintegration` on push and pull requests. See [REVIEW.md](REVIEW.md) for the earlier review record from 2026-11-12 in Vietnamese. No throughput benchmark has been recorded. Compose configuration was validated in that review; the full Compose application stack and API image build were not executed as part of it.
 
@@ -546,7 +606,9 @@ Build output: `target/order-management-api-1.0.0.jar`. Test reports: `target/sur
 - **Duplicate products are rejected.** Requests must contain distinct product IDs; duplicate lines receive `400`. Clients should combine quantities before sending the order.
 - **Schema changes are explicit.** Flyway migrations define tables, constraints, and indexes; Hibernate validates rather than silently changing the schema.
 - **Search executes in PostgreSQL.** `ProductSearchQuery` validates input, `ProductSpecifications` builds optional predicates, and `JpaSpecificationExecutor.findAll(specification, pageable)` applies filtering, sorting, and pagination in SQL. DTO mapping happens only for the returned page. Spring Data executes a filtered count query when needed; it may infer the total for a partial page.
-- **Scope remains explicit.** There is no authentication or idempotency key. A repeated successful create-order request can create a second order. Product `PUT` sets absolute stock, so clients must supply the intended inventory value rather than calculating updates from a stale read.
+- **Inventory and its journal share the transaction.** Product creation, order creation, cancellation, and restock insert movements using the same datasource/transaction. A failure in either write rolls back the entire operation. Stock is locked first; cancellation retains order-then-ascending-product lock ordering.
+- **The journal has targeted indexes and constraints.** `(product_id, created_at DESC, id DESC)` supports product history in either chronological direction and product-scoped counts. Partial unique indexes allow one opening entry per product and one deduction/cancellation per order/product/type. The latter starts with reference_order_id and also supports that foreign key's lookup; an extra redundant order-only index is not added. CHECK constraints validate signs, order/reason requirements, and before + delta = after, using BIGINT arithmetic to avoid INTEGER overflow during validation. The application and product constraint also reject negative stock.
+- **Scope remains explicit.** There is no authentication or idempotency key. Repeating a successful create-order or restock request can apply it again. PUT permits metadata replacement only when the supplied stock matches current locked stock; it cannot silently overwrite inventory from a stale payload.
 
 ### Search query plans and indexes
 
