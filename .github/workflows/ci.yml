@@ -10,6 +10,7 @@ permissions:
 jobs:
   verify:
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-java@v4
@@ -17,5 +18,5 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
-      - name: Unit, HTTP, and PostgreSQL integration tests
+      - name: Unit, HTTP, PostgreSQL, OpenAPI, and health tests
         run: sh mvnw -B -ntp verify -Pintegration

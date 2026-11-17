@@ -12,6 +12,8 @@ The project focuses on a single Spring Boot application and PostgreSQL database.
 
 For a source-based walkthrough in Vietnamese, see [INTERVIEW_PREP.md](INTERVIEW_PREP.md). The engineering review and its recorded test evidence are in [REVIEW.md](REVIEW.md).
 
+After starting the API, open **[Swagger UI](http://localhost:8080/swagger-ui/index.html)** to explore and execute requests. For a guided local demonstration, run [scripts/demo.ps1](scripts/demo.ps1); it creates records only when explicitly invoked against a loopback URL.
+
 ## Tech Stack
 
 | Area | Technology |
@@ -19,6 +21,8 @@ For a source-based walkthrough in Vietnamese, see [INTERVIEW_PREP.md](INTERVIEW_
 | Language | Java 21 |
 | Framework | Spring Boot 3.5.16 |
 | HTTP API | Spring Web / Spring MVC |
+| API documentation | OpenAPI 3.0 + springdoc-openapi 2.10.0 / Swagger UI |
+| Health | Spring Boot Actuator; status-only HTTP health |
 | Persistence | Spring Data JPA / Hibernate; Spring JDBC for PostgreSQL key arbitration |
 | Database | PostgreSQL 17 |
 | Schema migrations | Flyway |
@@ -28,7 +32,7 @@ For a source-based walkthrough in Vietnamese, see [INTERVIEW_PREP.md](INTERVIEW_
 | Local infrastructure | Docker Compose |
 | CI configuration | GitHub Actions |
 
-Dependency versions are managed by Spring Boot unless explicitly pinned in [pom.xml](pom.xml).
+Dependency versions are managed by Spring Boot unless explicitly pinned in [pom.xml](pom.xml). springdoc 2.10.0 is pinned for Spring Boot 3.5.16 according to the [official compatibility matrix](https://springdoc.org/v2/#what-is-the-compatibility-matrix-of-springdoc-openapi-with-spring-boot); springdoc 3.x targets Spring Boot 4 and is not used here.
 
 ## Features
 
@@ -46,6 +50,8 @@ Dependency versions are managed by Spring Boot unless explicitly pinned in [pom.
 - Cancel orders only from CREATED and restore stock once, including during concurrent requests.
 - Validate request DTOs and return consistent error responses.
 - Preserve order history by preventing deletion of referenced products.
+- Explore annotated request/response schemas, validation, error formats, and idempotency in Swagger UI.
+- Run a local API-driven demonstration and check status-only health without exposing environment details.
 
 ## Architecture
 
@@ -61,6 +67,7 @@ Controllers validate HTTP input and return response DTOs. Services own business 
 
 ```text
 src/main/java/com/example/ordermanagement/
+  config/       OpenAPI metadata and reusable error responses
   common/       Error handling and pagination DTO
   product/      Product entity, DTOs, repository, service, controller
   inventory/    Immutable stock movement entity, DTOs, repository, history query
@@ -80,6 +87,7 @@ src/test/java/com/example/ordermanagement/
 scripts/
   load-env.ps1  Load local configuration into the current process environment
   run-local.ps1 Start PostgreSQL, wait for readiness, and run the API
+  demo.ps1      Explicit local-only API demo; no automatic database seed
 ```
 
 ## Database Schema and Relationships
@@ -315,13 +323,13 @@ A separate Maven installation is not required. Run commands from the project roo
 Clone this repository using its GitHub **Code → HTTPS** URL, then open the cloned directory:
 
 ```powershell
-git clone <repository-https-url>
+git clone https://github.com/22127433/order-management-api.git
 Set-Location order-management-api
 java -version
 docker compose version
 ```
 
-Replace `<repository-https-url>` with this repository's actual clone URL. Do not copy local `.env`, build output, or credentials from another machine; create your own configuration from the committed template.
+Create your own configuration from the committed template. Local `.env`, build output, and credentials are excluded from version control.
 
 ### Windows: PostgreSQL in Docker, API on the host
 
@@ -349,7 +357,7 @@ Replace `<repository-https-url>` with this repository's actual clone URL. Do not
    .\mvnw.cmd spring-boot:run
    ```
 
-   Once Spring Boot reports that the application has started, use `http://localhost:8080/api/products` or open [requests.http](requests.http). The root path `/` is not an API endpoint.
+   Once Spring Boot reports that the application has started, open [Swagger UI](http://localhost:8080/swagger-ui/index.html), use `http://localhost:8080/api/products`, or open [requests.http](requests.http). The root path `/` is not an API endpoint.
 
 Spring Boot does not automatically load `.env` when launched by Maven. [load-env.ps1](scripts/load-env.ps1) reads values as data and sets process environment variables; it does not evaluate the file as PowerShell code. In Windows Command Prompt, the Maven command is `mvnw.cmd spring-boot:run`, after setting the equivalent environment variables in that session.
 
@@ -370,7 +378,38 @@ docker compose --profile app up -d --build --wait
 docker compose logs -f api
 ```
 
-Check the API startup log before sending requests; the API service has no HTTP healthcheck. Its image uses a multi-stage build and a non-root runtime user.
+The existing optional `app` profile starts PostgreSQL first and waits for database health. The API healthcheck calls `/actuator/health`, so `--wait` also checks API readiness. The default command without a profile still starts only PostgreSQL. The Dockerfile uses a Maven 3.9.11/Java 21 multi-stage build with a BuildKit Maven cache, runs unit/MVC tests during packaging, and uses a non-root runtime user; PostgreSQL integration tests run separately with the integration profile. No host JDK is needed for this option.
+
+### Swagger UI and health
+
+| Local URL | Purpose |
+| --- | --- |
+| [Swagger UI](http://localhost:8080/swagger-ui/index.html) | Interactive Product, Order, and Inventory documentation |
+| [OpenAPI JSON](http://localhost:8080/v3/api-docs) | Machine-readable OpenAPI 3.0 specification |
+| [OpenAPI YAML](http://localhost:8080/v3/api-docs.yaml) | YAML representation of the same API |
+| [Health](http://localhost:8080/actuator/health) | `200 {"status":"UP"}` when healthy; `503` when health is DOWN |
+
+Swagger documents all 13 business operations, request/response DTOs, query constraints, allowed lifecycle transitions, Idempotency-Key replay behavior, success headers/statuses, and the shared ApiError format. Schema example IDs are illustrative: use IDs returned by your own create requests or the demo script. Swagger's **Try it out** sends real requests to the running API and can change its data.
+
+Only Actuator health is exposed over HTTP. Health components/details are hidden; `/actuator/env`, `/actuator/configprops`, `/actuator/beans`, `/actuator/metrics`, and other management endpoints are not exposed. JMX endpoint exposure and health probes are disabled. Health is not a metrics dashboard or a guarantee of business correctness. Set `API_DOCS_ENABLED=false` in the process environment or `.env` to disable both Swagger UI and `/v3/api-docs`; reload the environment/restart Java, or recreate the API container. This setting does not add authentication.
+
+### Windows: guided demo
+
+With the API running, open a **second PowerShell terminal** in the project root:
+
+```powershell
+.\scripts\demo.ps1
+```
+
+For a custom host port:
+
+```powershell
+.\scripts\demo.ps1 -BaseUrl http://localhost:8081
+```
+
+The script accepts only loopback HTTP(S) URLs. It creates two demo products through the normal API, searches the catalog, updates metadata, creates an order with a fresh key, replays it, and checks a conflicting payload. It cancels that order and demonstrates that retry still returns the original snapshot. A separate order goes through confirmation, shipping, and delivery; restock and history follow. Expected validation, insufficient-stock, and protected-deletion errors are checked too.
+
+Each successful run adds **two products and two orders**; running it again intentionally creates another set. The printed result includes Product/Order IDs, the retry key, final keyboard stock **24**, and **five** keyboard inventory movements. Use those IDs in Swagger UI. Records remain in the local database: the script does not delete business history. It is opt-in, not a startup seed, migration seed, or production initialization mechanism. [requests.http](requests.http) remains available for step-by-step manual examples without running the script.
 
 ### Configuration and stopping services
 
@@ -383,6 +422,7 @@ Check the API startup log before sending requests; the API service has no HTTP h
 | `DB_HOST` | `localhost` | Database host when running Java locally |
 | `DB_PORT` | `POSTGRES_PORT` | Database connection port when running Java locally |
 | `SERVER_PORT` | `8080` | API port on the host |
+| `API_DOCS_ENABLED` | `true` | Enable OpenAPI and Swagger UI; set false to disable both |
 
 Inside the API container, Compose sets `DB_HOST=postgres`, `DB_PORT=5432`, and the internal API port to `8080`. Host ports are bound to `127.0.0.1`. To use an existing PostgreSQL instance, set the local connection variables and run `scripts/run-local.ps1 -SkipDatabase`.
 
@@ -613,7 +653,7 @@ On Linux/macOS, replace `.\mvnw.cmd` with `sh mvnw`. Surefire runs `*Test`; Fail
 
 ### Recorded verification
 
-The idempotency update was compiled and packaged successfully with `clean verify -Pintegration` on **2026-11-17**, using Java 21.0.6, Maven 3.9.11, Docker Engine 27.3.1, and PostgreSQL 17.11. The local Surefire/Failsafe XML reports record:
+The API documentation and developer-experience update was compiled and packaged successfully with `clean verify -Pintegration` on **2026-11-17**, using Java 21.0.6, Maven 3.9.11, Docker Engine 27.3.1, and PostgreSQL 17.11. The local Surefire/Failsafe XML reports record:
 
 | Suite | Test boundary | Passed |
 | --- | --- | ---: |
@@ -630,9 +670,10 @@ The idempotency update was compiled and packaged successfully with `clean verify
 | `ProductSearchIT` | Real PostgreSQL/Testcontainers; HTTP search, generated SQL, and query plans | 17 |
 | `InventoryManagementIT` | Real PostgreSQL/Testcontainers; inventory/journal atomicity, migration, constraints, and locking | 19 |
 | `OrderIdempotencyIT` | Real PostgreSQL/Testcontainers; durable replay, unique-key waits, rollback/takeover, timeout, and migration | 14 |
-| **Total** | **0 failures, 0 errors, 0 skipped** | **327** |
+| `ApiDocumentationIT` | Random-port HTTP + PostgreSQL/Testcontainers; OpenAPI schemas/refs, Swagger resources, health exposure, and empty startup data | 12 |
+| **Total** | **0 failures, 0 errors, 0 skipped** | **339** |
 
-The total consists of **129 unit tests, 108 MVC slice tests, and 90 PostgreSQL integration tests**. Unit/controller tests cover business rules, invalid quantities, missing products, duplicates, repeated cancellation, HTTP status codes, and validation. The integration tests verify schema mapping, committed inventory changes, forced SQL failures and rollback during creation/cancellation, monetary round-trips, and concurrent inventory access. The overlap tests observe a blocked request in PostgreSQL before allowing the first transaction to commit. Mock-based tests alone do not prove database transaction behavior.
+The total consists of **129 unit tests, 108 MVC slice tests, and 102 PostgreSQL integration tests**. Unit/controller tests cover business rules, invalid quantities, missing products, duplicates, repeated cancellation, HTTP status codes, and validation. The integration tests verify schema mapping, committed inventory changes, forced SQL failures and rollback during creation/cancellation, monetary round-trips, and concurrent inventory access. The overlap tests observe a blocked request in PostgreSQL before allowing the first transaction to commit. Mock-based tests alone do not prove database transaction behavior.
 
 Lifecycle coverage includes all 25 enum source/target pairs, valid fulfillment actions with unchanged stock/financial snapshots, every invalid action/state combination through real HTTP/service/database integration, and rollback/retry for each new action after a forced SQL failure. Concurrency tests observe duplicate confirm/ship/deliver requests waiting on the order row, both confirm-versus-cancel winner cases, and adjacent actions that succeed in valid serial order. A separate test schema is migrated to V2, populated with CREATED/CANCELLED orders, then upgraded to V3 to verify existing data is preserved and the expanded constraint is applied. These are controlled scenarios, not a proof that every possible interleaving is deadlock-free.
 
@@ -642,7 +683,11 @@ Inventory tests verify all four movement types, references/reasons/snapshots, ch
 
 Idempotency tests cover first creation, exact stored-response replay after cancellation/price changes, equivalent reordered payloads, conflicting payloads, case-sensitive keys, and optional-header compatibility. Concurrent workers observe PostgreSQL unique-key waits before commit, conflict, or rollback takeover. Forced receipt/stock UPDATE failures prove all transaction writes roll back; a deferred trigger rejects unfinished claims. A real five-second lock timeout verifies HTTP 409 and subsequent replay after the owner commits. The JDBC repository explicitly uses Spring's PostgreSQL SQLSTATE translator so `55P03` is classified as a lock conflict rather than an unclassified HTTP 500. V4-to-V5 migration preserves existing orders without fabricating keys. These controlled tests do not simulate every failure mode or prove exactly-once behavior across arbitrary infrastructure failures.
 
-These are recorded local results; check GitHub Actions separately for CI results. The [CI workflow](.github/workflows/ci.yml) is configured to run `verify -Pintegration` on push and pull requests. See [REVIEW.md](REVIEW.md) for the earlier review record from 2026-11-12 in Vietnamese. No throughput benchmark has been recorded. Compose configuration was validated in that review; the full Compose application stack and API image build were not executed as part of it.
+Documentation tests fetch the actual generated OpenAPI definition, resolve every internal reference, and check all 13 operations, separate request/response item schemas, validation constraints, idempotency headers/statuses, and the shared error format. They also serve Swagger HTML/JavaScript over a real HTTP socket, verify status-only health and seven hidden management endpoints, and confirm that startup does not insert demo products.
+
+These are recorded local results; check GitHub Actions separately for CI results. The [CI workflow](.github/workflows/ci.yml) runs `verify -Pintegration` on push and pull requests, including OpenAPI/health integration tests, with a 20-minute job timeout. See [REVIEW.md](REVIEW.md) for the earlier review record from 2026-11-12 in Vietnamese. No throughput benchmark has been recorded.
+
+The Dockerfile was also built on 2026-11-17, passing its 237 unit/MVC tests. The optional Compose app profile was started in an isolated verification project with temporary credentials and ports; both services became healthy. The PowerShell demo completed against the containerized API and checked final keyboard stock 24 and five movements. OpenAPI JSON/YAML returned 200, and Chrome headless rendered all 13 Swagger operations. Setting API_DOCS_ENABLED=false returned 404 for both Swagger UI and the JSON spec while health remained available. The temporary verification stack, database volume, and credential file were removed after these checks. These manual smoke checks are separate from the 339 JUnit test invocations above.
 
 Build output: `target/order-management-api-1.0.0.jar`. Test reports: `target/surefire-reports/` and `target/failsafe-reports/`. Build output is excluded from version control.
 

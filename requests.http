@@ -301,3 +301,13 @@ Content-Type: application/json
 Idempotency-Key: demo-retry-after-error-{{keyboardId}}
 
 {"items":[{"productId":{{keyboardId}},"quantity":1000000}]}
+
+
+### 59. Swagger UI -> 200 HTML
+GET {{baseUrl}}/swagger-ui/index.html
+
+### 60. OpenAPI 3 specification -> 200 JSON
+GET {{baseUrl}}/v3/api-docs
+
+### 61. Health -> 200 with status only when healthy
+GET {{baseUrl}}/actuator/health
