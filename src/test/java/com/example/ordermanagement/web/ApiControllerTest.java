@@ -17,6 +17,7 @@ import com.example.ordermanagement.common.ConflictException;
 import com.example.ordermanagement.common.PageResponse;
 import com.example.ordermanagement.common.ResourceNotFoundException;
 import com.example.ordermanagement.order.OrderController;
+import com.example.ordermanagement.order.IdempotentOrderService;
 import com.example.ordermanagement.order.OrderResponse;
 import com.example.ordermanagement.order.OrderService;
 import com.example.ordermanagement.order.OrderStatus;
@@ -47,6 +48,7 @@ class ApiControllerTest {
     @Autowired private MockMvc mvc;
     @MockitoBean private ProductService productService;
     @MockitoBean private OrderService orderService;
+    @MockitoBean private IdempotentOrderService idempotentOrders;
 
     @Test
     void createProductReturns201AndLocation() throws Exception {

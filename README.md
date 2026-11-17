@@ -19,7 +19,7 @@ For a source-based walkthrough in Vietnamese, see [INTERVIEW_PREP.md](INTERVIEW_
 | Language | Java 21 |
 | Framework | Spring Boot 3.5.16 |
 | HTTP API | Spring Web / Spring MVC |
-| Persistence | Spring Data JPA / Hibernate |
+| Persistence | Spring Data JPA / Hibernate; Spring JDBC for PostgreSQL key arbitration |
 | Database | PostgreSQL 17 |
 | Schema migrations | Flyway |
 | Validation | Jakarta Validation |
@@ -37,6 +37,7 @@ Dependency versions are managed by Spring Boot unless explicitly pinned in [pom.
 - Browse paginated stock history with initial stock, order deduction, cancellation, and manual restock entries.
 - Search product names without case sensitivity, filter by price/stock, and paginate with validated sorting.
 - Create an order with multiple distinct products.
+- Retry order creation safely with an optional persistent `Idempotency-Key`, including concurrent requests.
 - Reject unavailable stock and invalid quantities before changing inventory.
 - Calculate money with `BigDecimal` and store each item's original unit price.
 - Commit or roll back order creation and inventory changes together.
@@ -63,13 +64,14 @@ src/main/java/com/example/ordermanagement/
   common/       Error handling and pagination DTO
   product/      Product entity, DTOs, repository, service, controller
   inventory/    Immutable stock movement entity, DTOs, repository, history query
-  order/        Order/item entities, DTOs, repositories, service, controller
+  order/        Order/item entities, DTOs, services, idempotency coordination, repositories, controller
 src/main/resources/
   application.yml
   db/migration/V1__create_order_management_tables.sql
   db/migration/V2__index_products_price_id.sql
   db/migration/V3__extend_order_lifecycle_statuses.sql
   db/migration/V4__create_stock_movements.sql
+  db/migration/V5__order_creation_idempotency.sql
 src/test/java/com/example/ordermanagement/
   product/      Mockito service tests
   order/        Mockito business tests
@@ -88,6 +90,7 @@ erDiagram
     customer_orders ||--|{ order_items : contains
     products ||--o{ stock_movements : inventory_history
     customer_orders o|--o{ stock_movements : optional_reference
+    customer_orders ||--o| order_idempotency : creation_receipt
 
     products {
         bigint id PK
@@ -113,6 +116,14 @@ erDiagram
         numeric subtotal
     }
 
+    order_idempotency {
+        varchar idempotency_key PK
+        text request_payload
+        bigint order_id FK,UK
+        text response_body
+        timestamptz created_at
+    }
+
     stock_movements {
         bigint id PK
         bigint product_id FK
@@ -136,6 +147,8 @@ See [V1](src/main/resources/db/migration/V1__create_order_management_tables.sql)
 
 [V4](src/main/resources/db/migration/V4__create_stock_movements.sql) adds the inventory journal, restrictive product/order foreign keys, balance/type constraints, and indexes. It does not change existing product stock or backfill historical movements.
 
+[V5](src/main/resources/db/migration/V5__order_creation_idempotency.sql) adds `order_idempotency`. The key's primary-key B-tree arbitrates concurrent claims and supports exact lookup; the unique order foreign-key index supports receipt/order lookup without a redundant index. Full canonical request text avoids hash-collision ambiguity. The original response DTO is stored as JSON text, preserving decimal values and timestamps when replayed. An order has zero or one receipt; a committed receipt references exactly one order. A deferred constraint trigger rejects incomplete reservations at commit. Existing orders are unchanged and receive no invented keys. No timestamp index is added because there is no expiry/cleanup query.
+
 ## API Endpoints
 
 Default base URL: `http://localhost:8080`. Request and response bodies use JSON.
@@ -149,7 +162,7 @@ Default base URL: `http://localhost:8080`. Request and response bodies use JSON.
 | DELETE | `/api/products/{id}` | Delete a product without order references or inventory history | 204, empty body |
 | POST | `/api/products/{id}/restock` | Add positive stock with a reason | 200 |
 | GET | `/api/products/{id}/stock-movements` | Paginated inventory history, sorted by time | 200 |
-| POST | `/api/orders` | Create an order | 201 + `Location` |
+| POST | `/api/orders` | Create an order; optional `Idempotency-Key` | 201 first creation, 200 replay; both include `Location` |
 | GET | `/api/orders/{id}` | Get an order and its items | 200 |
 | POST | `/api/orders/{id}/confirm` | Confirm a CREATED order | 200 |
 | POST | `/api/orders/{id}/ship` | Mark a CONFIRMED order as handed to the carrier | 200 |
@@ -157,6 +170,39 @@ Default base URL: `http://localhost:8080`. Request and response bodies use JSON.
 | POST | `/api/orders/{id}/cancel` | Cancel a CREATED order and restore stock | 200 |
 
 Pagination starts at page `0`; page size must be between `1` and `100`. Products are sorted by ID ascending unless `sort` is supplied. `PUT` requires `name`, `price`, and `stockQuantity`; `description` is optional. Since V4, PUT must keep stockQuantity equal to the locked current stock; a different value returns `409`. Use restock to add stock, rather than replacing an absolute stock value and bypassing the journal.
+
+### Idempotent order creation
+
+```http
+POST /api/orders
+Content-Type: application/json
+Idempotency-Key: checkout-example-1
+
+{"items":[{"productId":1,"quantity":2}]}
+```
+
+Choose a fresh key for each intended order (for example, a client-generated UUID), and keep that key and payload for retries. Keys are case-sensitive, 1–128 ASCII letters/digits or `.`, `_`, `:`, `-`; empty, whitespace, unsupported characters, and multiple key headers return `400`. Keys are globally scoped to this endpoint across all clients; the project has no authentication. A future authenticated API must scope keys to the authenticated principal/tenant. Keyed requests still run normal DTO and service validation.
+
+| Situation | HTTP result | Database effect |
+| --- | --- | --- |
+| No header | `201 Created`, existing behavior | Every successful call creates a new order |
+| New key, valid request | `201 Created`, `Idempotency-Replayed: false` | One order, stock deduction, inventory movements, and completed receipt |
+| Same key and equivalent valid payload | `200 OK`, `Idempotency-Replayed: true` | Returns the stored creation response; no stock or journal write |
+| Same committed key, different valid payload | `409 Conflict` | No new order or inventory change |
+| Owner still running | Waits on PostgreSQL; a lock wait exceeding five seconds returns `409` | Client retries the same key/payload; no committed pending reservation |
+| Creation fails | Normal `400`/`404`/`409`/`500` error as applicable | All transaction writes, including the claim, roll back; failures are not cached |
+
+Both keyed success responses include `Location: /api/orders/{id}` and the same creation-response fields shown in [Create Order](#create-order). Replay uses `200` because this call retrieves an existing result. The snapshot retains its original `CREATED` status even if the order has since been confirmed or cancelled; use `GET /api/orders/{id}` for its current state. A retry after cancellation does **not** revive the order or deduct stock again.
+
+Payload equivalence uses the validated set of `(productId, quantity)` pairs sorted by product ID. Item ordering, JSON property ordering, and whitespace are insignificant; changing a product or quantity conflicts. Duplicate products and invalid payloads still return `400`. Current catalog prices are not part of the client payload: replay keeps the original prices and totals even after a price change.
+
+`IdempotentOrderService.create()` opens a READ COMMITTED transaction. Its JDBC repository claims the primary key with `INSERT ... ON CONFLICT DO NOTHING` **before product locks**. A winning insert calls the existing `OrderService.create()` through its Spring proxy; REQUIRED joins the outer transaction. `JdbcTemplate` and Hibernate share the same datasource connection through `JpaTransactionManager`. Completion records the order FK and serialized response before commit; any failure, including flush/commit failure, rolls everything back.
+
+For concurrent claims, PostgreSQL waits for the competing transaction. After its commit, the losing INSERT returns no inserted row, and a **separate SELECT statement** sees the completed receipt using a fresh READ COMMITTED snapshot. After its rollback, the waiting insert can claim the key and create the order. Catching a unique-constraint exception and querying inside the already-aborted PostgreSQL transaction is deliberately avoided. See [unique-index concurrency](https://www.postgresql.org/docs/17/index-unique-checks.html) and [READ COMMITTED / ON CONFLICT behavior](https://www.postgresql.org/docs/17/transaction-iso.html).
+
+No durable PROCESSING state or separate reservation transaction exists. The deferred database trigger prevents committing an unfinished claim; disconnect/crash rollback releases an abandoned uncommitted claim. The existing five-second lock timeout bounds a waiting caller, rather than reclaiming a still-live owner's transaction. An indefinitely stalled live session still needs database session/statement timeout policy or operator termination; no automatic lease takeover is implemented. A production deployment should configure appropriate PostgreSQL `idle_in_transaction_session_timeout`/`statement_timeout` values for its workload.
+
+Receipts are retained indefinitely; expiry and cleanup are not implemented. Deleting a receipt would permit that key to create another order. Reusing another key or omitting the header creates a separate order, and restock has no idempotency support. This provides atomic deduplication for retained keys in this database, **not an exactly-once guarantee under all conditions**. A client that loses a response after commit can retry the same key to recover the stored result. See [requests.http](requests.http), examples 52–58.
 
 ### Stock adjustment and inventory history
 
@@ -167,7 +213,7 @@ Content-Type: application/json
 {"quantity":5,"reason":"Supplier delivery"}
 ```
 
-`quantity` is an integer from 1 to 2,147,483,647, and the resulting stock must remain within that range (zero remains valid as an existing stock value). `reason` is required, trimmed, nonblank, and at most 500 characters. Invalid input returns `400`, a missing product returns `404`, and stock overflow returns `409`. Success returns `200` with the updated ProductResponse. Retrying a successful restock adds stock again; no idempotency key is implemented.
+`quantity` is an integer from 1 to 2,147,483,647, and the resulting stock must remain within that range (zero remains valid as an existing stock value). `reason` is required, trimmed, nonblank, and at most 500 characters. Invalid input returns `400`, a missing product returns `404`, and stock overflow returns `409`. Success returns `200` with the updated ProductResponse. Retrying a successful restock adds stock again; `Idempotency-Key` is supported only for order creation, not restock.
 
 ```http
 GET /api/products/1/stock-movements?page=0&size=20&sort=createdAt,desc
@@ -567,29 +613,34 @@ On Linux/macOS, replace `.\mvnw.cmd` with `sh mvnw`. Surefire runs `*Test`; Fail
 
 ### Recorded verification
 
-The inventory update was compiled and packaged successfully with `clean verify -Pintegration` on **2026-11-17**, using Java 21.0.6, Maven 3.9.11, Docker Engine 27.3.1, and PostgreSQL 17.11. The local Surefire/Failsafe XML reports record:
+The idempotency update was compiled and packaged successfully with `clean verify -Pintegration` on **2026-11-17**, using Java 21.0.6, Maven 3.9.11, Docker Engine 27.3.1, and PostgreSQL 17.11. The local Surefire/Failsafe XML reports record:
 
 | Suite | Test boundary | Passed |
 | --- | --- | ---: |
 | `OrderServiceTest` | JUnit 5 + Mockito; mocked repositories | 33 |
+| `IdempotentOrderServiceTest` | JUnit 5 + Mockito; mocked order service and idempotency repository | 18 |
 | `OrderStatusTest` | JUnit 5; complete 25-pair transition matrix | 25 |
 | `ProductServiceTest` | JUnit 5 + Mockito; mocked repositories | 16 |
 | `StockMovementTest` | JUnit 5; movement snapshots, balance, and history query validation | 14 |
 | `ProductSearchQueryTest` | JUnit 5; query validation and sort contract | 23 |
 | `ApiControllerTest` | MockMvc controller slice; mocked services | 72 |
 | `InventoryControllerTest` | MockMvc controller slice; mocked product service | 24 |
+| `OrderIdempotencyControllerTest` | MockMvc slice; real coordinator, mocked order service/JDBC repository | 12 |
 | `OrderManagementIT` | Spring context + real PostgreSQL/Testcontainers | 40 |
 | `ProductSearchIT` | Real PostgreSQL/Testcontainers; HTTP search, generated SQL, and query plans | 17 |
 | `InventoryManagementIT` | Real PostgreSQL/Testcontainers; inventory/journal atomicity, migration, constraints, and locking | 19 |
-| **Total** | **0 failures, 0 errors, 0 skipped** | **283** |
+| `OrderIdempotencyIT` | Real PostgreSQL/Testcontainers; durable replay, unique-key waits, rollback/takeover, timeout, and migration | 14 |
+| **Total** | **0 failures, 0 errors, 0 skipped** | **327** |
 
-Unit/controller tests cover business rules, invalid quantities, missing products, duplicates, repeated cancellation, HTTP status codes, and validation. The integration tests verify schema mapping, committed inventory changes, forced SQL failures and rollback during creation/cancellation, monetary round-trips, and concurrent inventory access. The overlap tests observe a blocked request in PostgreSQL before allowing the first transaction to commit. Mock-based tests alone do not prove database transaction behavior.
+The total consists of **129 unit tests, 108 MVC slice tests, and 90 PostgreSQL integration tests**. Unit/controller tests cover business rules, invalid quantities, missing products, duplicates, repeated cancellation, HTTP status codes, and validation. The integration tests verify schema mapping, committed inventory changes, forced SQL failures and rollback during creation/cancellation, monetary round-trips, and concurrent inventory access. The overlap tests observe a blocked request in PostgreSQL before allowing the first transaction to commit. Mock-based tests alone do not prove database transaction behavior.
 
 Lifecycle coverage includes all 25 enum source/target pairs, valid fulfillment actions with unchanged stock/financial snapshots, every invalid action/state combination through real HTTP/service/database integration, and rollback/retry for each new action after a forced SQL failure. Concurrency tests observe duplicate confirm/ship/deliver requests waiting on the order row, both confirm-versus-cancel winner cases, and adjacent actions that succeed in valid serial order. A separate test schema is migrated to V2, populated with CREATED/CANCELLED orders, then upgraded to V3 to verify existing data is preserved and the expanded constraint is applied. These are controlled scenarios, not a proof that every possible interleaving is deadlock-free.
 
 Search tests cover case-insensitive name matching, combined/individual filters, exact inclusive decimal bounds, true/false/omitted stock filters, literal SQL metacharacters, default compatibility, every supported sort, deterministic ties, filtered totals, empty/out-of-range pages, and invalid inputs. `ProductSearchIT` verifies that generated JPA SQL contains filtering, ordering, database pagination, and a filtered count, and checks the new price index on a 20,000-row fixture.
 
 Inventory tests verify all four movement types, references/reasons/snapshots, chronological pagination with timestamp ties, PUT/delete protections, SQL constraints, and V3→V4 migration without backfill. Forced movement INSERT failures cover product creation, order creation, cancellation, and restock; forced stock UPDATE failures verify journal inserts roll back too. Multi-product tests fail the second movement after the first was inserted. Overlap tests observe product lock waits for restock versus restock/order/cancel and an integer-overflow race; stock and movement chains remain consistent. Existing overselling and duplicate-cancellation tests now also assert that only one corresponding movement is committed. Mock tests do not establish these database guarantees.
+
+Idempotency tests cover first creation, exact stored-response replay after cancellation/price changes, equivalent reordered payloads, conflicting payloads, case-sensitive keys, and optional-header compatibility. Concurrent workers observe PostgreSQL unique-key waits before commit, conflict, or rollback takeover. Forced receipt/stock UPDATE failures prove all transaction writes roll back; a deferred trigger rejects unfinished claims. A real five-second lock timeout verifies HTTP 409 and subsequent replay after the owner commits. The JDBC repository explicitly uses Spring's PostgreSQL SQLSTATE translator so `55P03` is classified as a lock conflict rather than an unclassified HTTP 500. V4-to-V5 migration preserves existing orders without fabricating keys. These controlled tests do not simulate every failure mode or prove exactly-once behavior across arbitrary infrastructure failures.
 
 These are recorded local results; check GitHub Actions separately for CI results. The [CI workflow](.github/workflows/ci.yml) is configured to run `verify -Pintegration` on push and pull requests. See [REVIEW.md](REVIEW.md) for the earlier review record from 2026-11-12 in Vietnamese. No throughput benchmark has been recorded. Compose configuration was validated in that review; the full Compose application stack and API image build were not executed as part of it.
 
@@ -608,7 +659,8 @@ Build output: `target/order-management-api-1.0.0.jar`. Test reports: `target/sur
 - **Search executes in PostgreSQL.** `ProductSearchQuery` validates input, `ProductSpecifications` builds optional predicates, and `JpaSpecificationExecutor.findAll(specification, pageable)` applies filtering, sorting, and pagination in SQL. DTO mapping happens only for the returned page. Spring Data executes a filtered count query when needed; it may infer the total for a partial page.
 - **Inventory and its journal share the transaction.** Product creation, order creation, cancellation, and restock insert movements using the same datasource/transaction. A failure in either write rolls back the entire operation. Stock is locked first; cancellation retains order-then-ascending-product lock ordering.
 - **The journal has targeted indexes and constraints.** `(product_id, created_at DESC, id DESC)` supports product history in either chronological direction and product-scoped counts. Partial unique indexes allow one opening entry per product and one deduction/cancellation per order/product/type. The latter starts with reference_order_id and also supports that foreign key's lookup; an extra redundant order-only index is not added. CHECK constraints validate signs, order/reason requirements, and before + delta = after, using BIGINT arithmetic to avoid INTEGER overflow during validation. The application and product constraint also reject negative stock.
-- **Scope remains explicit.** There is no authentication or idempotency key. Repeating a successful create-order or restock request can apply it again. PUT permits metadata replacement only when the supplied stock matches current locked stock; it cannot silently overwrite inventory from a stale payload.
+- **Order creation can be deduplicated.** An optional PostgreSQL-backed key coordinates creation before inventory locks; the receipt and original response commit in the same transaction as order/stock/journal. Invalid/failed transactions do not consume the key. Retained keys have no automatic expiry.
+- **Scope remains explicit.** There is no authentication. Repeating a successful create-order without a key, with another key, or a restock request can apply it again. PUT permits metadata replacement only when the supplied stock matches current locked stock; it cannot silently overwrite inventory from a stale payload.
 
 ### Search query plans and indexes
 

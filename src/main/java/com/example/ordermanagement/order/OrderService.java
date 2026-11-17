@@ -1,6 +1,5 @@
 package com.example.ordermanagement.order;
 
-import com.example.ordermanagement.common.BadRequestException;
 import com.example.ordermanagement.common.ResourceNotFoundException;
 import com.example.ordermanagement.inventory.StockMovement;
 import com.example.ordermanagement.inventory.StockMovementRepository;
@@ -27,22 +26,7 @@ public class OrderService {
 
     @Transactional
     public OrderResponse create(CreateOrderRequest request) {
-        if (request == null || request.items() == null || request.items().isEmpty()
-                || request.items().size() > 100) {
-            throw new BadRequestException("An order must contain between 1 and 100 items");
-        }
-        Map<Long, Integer> quantities = new TreeMap<>();
-        for (CreateOrderRequest.Item item : request.items()) {
-            if (item == null || item.productId() == null || item.productId() <= 0) {
-                throw new BadRequestException("Each item must have a positive productId");
-            }
-            if (item.quantity() == null || item.quantity() <= 0 || item.quantity() > 1_000_000) {
-                throw new BadRequestException("Item quantity must be between 1 and 1000000");
-            }
-            if (quantities.putIfAbsent(item.productId(), item.quantity()) != null) {
-                throw new BadRequestException("Duplicate productId: " + item.productId());
-            }
-        }
+        Map<Long, Integer> quantities = OrderRequestNormalizer.quantities(request);
 
         // Every inventory operation locks products in ascending id order to avoid
         // opposite lock acquisition when two orders contain the same products.

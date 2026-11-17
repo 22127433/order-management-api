@@ -249,3 +249,55 @@ PUT {{baseUrl}}/api/products/{{keyboardId}}
 Content-Type: application/json
 
 {"name":"Mechanical Keyboard","description":"USB keyboard","price":59.90,"stockQuantity":0}
+
+
+### 52. Create Order With Idempotency-Key -> 201; keyboard stock 24 -> 23
+# @name createIdempotentOrder
+# Change this key for a NEW intended order; retain it for retries 53-56.
+# It uses the keyboard ID so rerunning the initial product fixtures uses a different key.
+POST {{baseUrl}}/api/orders
+Content-Type: application/json
+Idempotency-Key: demo-keyboard-{{keyboardId}}
+
+{"items":[{"productId":{{keyboardId}},"quantity":1}]}
+
+### 53. Retry Same Key and Payload -> 200; same order ID/body, stock stays 23
+POST {{baseUrl}}/api/orders
+Content-Type: application/json
+Idempotency-Key: demo-keyboard-{{keyboardId}}
+
+{"items":[{"quantity":1,"productId":{{keyboardId}}}]}
+
+### 54. Same Key With Different Quantity -> 409; no extra order or deduction
+POST {{baseUrl}}/api/orders
+Content-Type: application/json
+Idempotency-Key: demo-keyboard-{{keyboardId}}
+
+{"items":[{"productId":{{keyboardId}},"quantity":2}]}
+
+### 55. Cancel the Keyed Order -> 200; keyboard stock 23 -> 24
+POST {{baseUrl}}/api/orders/{{createIdempotentOrder.response.body.$.id}}/cancel
+
+### 56. Retry Creation After Cancellation -> 200; original CREATED snapshot, no stock change
+# GET the order URL to see its current CANCELLED state.
+POST {{baseUrl}}/api/orders
+Content-Type: application/json
+Idempotency-Key: demo-keyboard-{{keyboardId}}
+
+{"items":[{"productId":{{keyboardId}},"quantity":1}]}
+
+### 57. Invalid Idempotency-Key -> 400; no key reservation
+POST {{baseUrl}}/api/orders
+Content-Type: application/json
+Idempotency-Key: invalid key with spaces
+
+{"items":[{"productId":{{keyboardId}},"quantity":1}]}
+
+### 58. Failed Creation Does Not Consume Key -> 409 insufficient stock
+# The failed key can be retried after sufficient restock, or used with corrected input.
+# A committed successful key would instead reject changed input.
+POST {{baseUrl}}/api/orders
+Content-Type: application/json
+Idempotency-Key: demo-retry-after-error-{{keyboardId}}
+
+{"items":[{"productId":{{keyboardId}},"quantity":1000000}]}
