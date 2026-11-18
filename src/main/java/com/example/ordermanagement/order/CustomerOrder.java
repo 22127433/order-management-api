@@ -1,6 +1,7 @@
 package com.example.ordermanagement.order;
 
 import com.example.ordermanagement.common.ConflictException;
+import com.example.ordermanagement.auth.AppUser;
 import com.example.ordermanagement.product.Product;
 import jakarta.persistence.CascadeType;
 import jakarta.persistence.Column;
@@ -13,6 +14,9 @@ import jakarta.persistence.Id;
 import jakarta.persistence.OneToMany;
 import jakarta.persistence.OrderBy;
 import jakarta.persistence.Table;
+import jakarta.persistence.FetchType;
+import jakarta.persistence.JoinColumn;
+import jakarta.persistence.ManyToOne;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.ArrayList;
@@ -36,14 +40,21 @@ public class CustomerOrder {
     @Column(nullable = false, updatable = false)
     private Instant createdAt;
 
+    // Nullable only for data created before authentication was introduced; no cascade to users.
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "user_id", updatable = false)
+    private AppUser user;
+
     @OneToMany(mappedBy = "order", cascade = CascadeType.ALL, orphanRemoval = true)
     @OrderBy("id ASC")
     private List<OrderItem> items = new ArrayList<>();
 
     protected CustomerOrder() { }
 
-    public static CustomerOrder create() {
+    public static CustomerOrder create(AppUser owner) {
+        if (owner == null) { throw new IllegalArgumentException("New orders require an owner"); }
         CustomerOrder order = new CustomerOrder();
+        order.user = owner;
         order.status = OrderStatus.CREATED;
         order.totalAmount = new BigDecimal("0.00");
         order.createdAt = Instant.now();
@@ -98,5 +109,6 @@ public class CustomerOrder {
     public OrderStatus getStatus() { return status; }
     public BigDecimal getTotalAmount() { return totalAmount; }
     public Instant getCreatedAt() { return createdAt; }
+    public AppUser getUser() { return user; }
     public List<OrderItem> getItems() { return Collections.unmodifiableList(items); }
 }

@@ -1,5 +1,7 @@
 package com.example.ordermanagement.inventory;
 
+import com.example.ordermanagement.support.TestSecurity;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 
@@ -28,7 +30,7 @@ class StockMovementTest {
     @Test
     void snapshotsDoNotFollowLaterProductChanges() {
         Product product = product(10);
-        CustomerOrder order = CustomerOrder.create();
+        CustomerOrder order = CustomerOrder.create(TestSecurity.user(1L));
         product.deductStock(3);
         StockMovement deduction = StockMovement.deduction(product, order, 3, 10);
         product.restoreStock(3);
@@ -47,7 +49,7 @@ class StockMovementTest {
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> StockMovement.deduction(product, null, 1, 6))
                 .isInstanceOf(IllegalArgumentException.class);
-        assertThatThrownBy(() -> StockMovement.cancellation(product, CustomerOrder.create(), 0, 5))
+        assertThatThrownBy(() -> StockMovement.cancellation(product, CustomerOrder.create(TestSecurity.user(1L)), 0, 5))
                 .isInstanceOf(IllegalArgumentException.class);
         assertThatThrownBy(() -> StockMovement.restock(product, 1, 4, " "))
                 .isInstanceOf(IllegalArgumentException.class);

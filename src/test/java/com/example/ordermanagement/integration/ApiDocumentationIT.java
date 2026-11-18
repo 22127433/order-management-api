@@ -19,7 +19,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 
 @SpringBootTest(webEnvironment = SpringBootTest.WebEnvironment.RANDOM_PORT)
 @Testcontainers
-class ApiDocumentationIT {
+class ApiDocumentationIT extends com.example.ordermanagement.support.JwtTestProperties {
     @Container
     static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine");
 
@@ -31,18 +31,37 @@ class ApiDocumentationIT {
     }
 
     @Autowired private TestRestTemplate http;
+    @Autowired private org.springframework.jdbc.core.JdbcTemplate jdbc;
+
+    @Test
+    void openApiDocumentsBearerSecurityAndExplicitPublicOperationsWithoutPasswordResponses() {
+        JsonNode spec = specification();
+        assertThat(spec.at("/components/securitySchemes/bearerAuth/type").asText()).isEqualTo("http");
+        assertThat(spec.at("/components/securitySchemes/bearerAuth/scheme").asText()).isEqualTo("bearer");
+        assertThat(spec.path("security").get(0).has("bearerAuth")).isTrue();
+        for (String path : List.of("/api/auth/register", "/api/auth/login", "/api/products", "/api/products/{id}")) {
+            String method = path.startsWith("/api/auth") ? "post" : "get";
+            JsonNode operation = spec.path("paths").path(path).path(method);
+            assertThat(operation.has("security")).as(path).isTrue();
+            assertThat(operation.path("security").isEmpty()).as(path).isTrue();
+        }
+        assertThat(spec.at("/components/schemas/RegisterRequest/properties").has("role")).isFalse();
+        assertThat(spec.at("/components/schemas/RegisterRequest/properties/password/writeOnly").asBoolean()).isTrue();
+        assertThat(spec.at("/components/schemas/UserResponse/properties").has("passwordHash")).isFalse();
+        assertThat(spec.at("/components/schemas/UserResponse/properties").has("password")).isFalse();
+    }
 
     @Test
     void specificationDocumentsAllBusinessOperationsAndResolvesEveryLocalReference() {
         JsonNode spec = specification();
         assertThat(spec.path("openapi").asText()).startsWith("3.0.");
         assertThat(spec.at("/info/title").asText()).isEqualTo("Order Management API");
-        for (String path : List.of("/api/products", "/api/products/{id}", "/api/products/{id}/restock",
+        for (String path : List.of("/api/auth/register", "/api/auth/login", "/api/products", "/api/products/{id}", "/api/products/{id}/restock",
                 "/api/products/{id}/stock-movements", "/api/orders", "/api/orders/{id}",
                 "/api/orders/{id}/confirm", "/api/orders/{id}/ship", "/api/orders/{id}/deliver", "/api/orders/{id}/cancel")) {
             assertThat(spec.path("paths").has(path)).as(path).isTrue();
         }
-        assertThat(spec.path("paths").size()).isEqualTo(10);
+        assertThat(spec.path("paths").size()).isEqualTo(12);
         int operations = 0;
         for (JsonNode path : spec.path("paths")) {
             for (JsonNode operation : path) {
@@ -54,7 +73,7 @@ class ApiDocumentationIT {
                 }
             }
         }
-        assertThat(operations).isEqualTo(13);
+        assertThat(operations).isEqualTo(15);
         assertReferencesResolve(spec, spec);
     }
 
@@ -134,12 +153,13 @@ class ApiDocumentationIT {
         assertThat(health.getBody().path("status").asText()).isEqualTo("UP");
         JsonNode products = http.getForObject("/api/products", JsonNode.class);
         assertThat(products.path("totalElements").asInt()).isZero();
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM app_users", Long.class)).isZero();
     }
 
     @ParameterizedTest
     @ValueSource(strings = {"env", "configprops", "beans", "metrics", "info", "heapdump", "loggers"})
     void otherActuatorEndpointsAreNotExposed(String endpoint) {
-        assertThat(http.getForEntity("/actuator/" + endpoint, String.class).getStatusCode()).isEqualTo(HttpStatus.NOT_FOUND);
+        assertThat(http.getForEntity("/actuator/" + endpoint, String.class).getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
     }
 
     private JsonNode specification() {

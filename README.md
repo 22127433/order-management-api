@@ -1,722 +1,312 @@
 # Order Management API
 
-A Java 21 and Spring Boot REST API for managing products, inventory, and orders. This portfolio project demonstrates layered backend development, database transactions, pessimistic locking, request validation, and automated testing with PostgreSQL.
+A Java 21 / Spring Boot monolith demonstrating product search, transactional inventory, order lifecycle management, persistent idempotency, and user-based access control. It is a portfolio project for a Fresher Java Backend role.
 
-[Project Overview](#project-overview) · [Tech Stack](#tech-stack) · [Features](#features) · [Architecture](#architecture) · [Database Schema](#database-schema-and-relationships) · [API Endpoints](#api-endpoints) · [How to Run](#how-to-run) · [Example Requests & Responses](#example-requests--responses) · [Testing](#testing) · [Design Decisions](#design-decisions)
+[Overview](#project-overview) | [Stack](#tech-stack) | [Features](#features) | [Architecture](#architecture) | [Database](#database-schema-and-relationships) | [Endpoints](#api-endpoints) | [Run](#how-to-run) | [Examples](#example-requests--responses) | [Tests](#testing) | [Decisions](#design-decisions)
 
 ## Project Overview
 
-Clients can manage a product catalog, place orders containing multiple products, confirm/ship/deliver orders, and cancel newly created orders to restore inventory. The server calculates prices and totals, checks stock availability, and persists inventory changes together with each order in a single transaction.
+Customers register, log in, browse products, and create/read their own orders. Administrators manage the catalog and inventory, inspect any order, and cancel or advance orders through fulfillment. Administrators may also create orders owned by themselves. Customer cancellation is not exposed: cancellation and all lifecycle actions require ADMIN.
 
-The project focuses on a single Spring Boot application and PostgreSQL database. It has no frontend or authentication layer. It does not include payment processing, carrier integration, or customer accounts.
+Prices are read from the database and snapshotted when ordering. Order/items, stock changes, inventory movements, and any idempotency receipt commit or roll back together. The project remains one Spring Boot application and one PostgreSQL database. There is no frontend application, payment/carrier integration, microservice, Redis, Kafka, refresh-token flow, or user/role administration API.
 
-For a source-based walkthrough in Vietnamese, see [INTERVIEW_PREP.md](INTERVIEW_PREP.md). The engineering review and its recorded test evidence are in [REVIEW.md](REVIEW.md).
-
-After starting the API, open **[Swagger UI](http://localhost:8080/swagger-ui/index.html)** to explore and execute requests. For a guided local demonstration, run [scripts/demo.ps1](scripts/demo.ps1); it creates records only when explicitly invoked against a loopback URL.
+[Swagger UI](http://localhost:8080/swagger-ui/index.html) is available after startup. [INTERVIEW_PREP.md](INTERVIEW_PREP.md) explains the source in Vietnamese. [REVIEW.md](REVIEW.md) records an earlier review; its old test counts and unauthenticated API behavior are historical.
 
 ## Tech Stack
 
 | Area | Technology |
 | --- | --- |
-| Language | Java 21 |
-| Framework | Spring Boot 3.5.16 |
-| HTTP API | Spring Web / Spring MVC |
-| API documentation | OpenAPI 3.0 + springdoc-openapi 2.10.0 / Swagger UI |
-| Health | Spring Boot Actuator; status-only HTTP health |
-| Persistence | Spring Data JPA / Hibernate; Spring JDBC for PostgreSQL key arbitration |
-| Database | PostgreSQL 17 |
-| Schema migrations | Flyway |
-| Validation | Jakarta Validation |
-| Build | Maven 3.9.11 via Maven Wrapper |
-| Testing | JUnit 5, Mockito, MockMvc, Testcontainers |
-| Local infrastructure | Docker Compose |
-| CI configuration | GitHub Actions |
+| Language / build | Java 21, Maven 3.9.11 via Maven Wrapper |
+| Application | Spring Boot 3.5.16, Spring Web / MVC |
+| Persistence | Spring Data JPA, Hibernate, Spring JDBC for key arbitration |
+| Database / migrations | PostgreSQL 17, Flyway V1-V6 |
+| Authentication | Spring Security 6.5.11, OAuth2 Resource Server / JOSE, Nimbus JWT |
+| Password storage | Spring BCryptPasswordEncoder, cost 12 |
+| Validation | Jakarta Validation and service guards |
+| API documentation | OpenAPI 3.0, springdoc-openapi 2.10.0, Swagger UI |
+| Health | Actuator with status-only health |
+| Tests | JUnit 5, Mockito, MockMvc, Spring Security Test, PostgreSQL Testcontainers |
+| Local / CI | Docker Compose, GitHub Actions |
 
-Dependency versions are managed by Spring Boot unless explicitly pinned in [pom.xml](pom.xml). springdoc 2.10.0 is pinned for Spring Boot 3.5.16 according to the [official compatibility matrix](https://springdoc.org/v2/#what-is-the-compatibility-matrix-of-springdoc-openapi-with-spring-boot); springdoc 3.x targets Spring Boot 4 and is not used here.
+Spring Boot manages security/Nimbus dependency versions in [pom.xml](pom.xml). springdoc is pinned using its [Boot 3.5 compatibility matrix](https://springdoc.org/v2/#what-is-the-compatibility-matrix-of-springdoc-openapi-with-spring-boot). JWT parsing, MAC verification, expiry checks, and password hashing use maintained libraries, not custom cryptographic implementations.
 
 ## Features
 
-- Create, read, and update products; delete legacy products only when no order or inventory history references them.
-- Restock products with a reason and record inventory movements atomically with stock changes.
-- Browse paginated stock history with initial stock, order deduction, cancellation, and manual restock entries.
-- Search product names without case sensitivity, filter by price/stock, and paginate with validated sorting.
-- Create an order with multiple distinct products.
-- Retry order creation safely with an optional persistent `Idempotency-Key`, including concurrent requests.
-- Reject unavailable stock and invalid quantities before changing inventory.
-- Calculate money with `BigDecimal` and store each item's original unit price.
-- Commit or roll back order creation and inventory changes together.
-- Use `PESSIMISTIC_WRITE` locks to prevent concurrent orders from overselling inventory.
-- Advance orders through confirmed, shipped, and delivered states without deducting stock again.
-- Cancel orders only from CREATED and restore stock once, including during concurrent requests.
-- Validate request DTOs and return consistent error responses.
-- Preserve order history by preventing deletion of referenced products.
-- Explore annotated request/response schemas, validation, error formats, and idempotency in Swagger UI.
-- Run a local API-driven demonstration and check status-only health without exposing environment details.
+- Product CRUD with protected writes; case-insensitive name search, inclusive price filtering, stock filtering, sorting, and database pagination.
+- Multi-product ordering, BigDecimal totals, original price snapshots, and stock checks under ascending product-ID write locks.
+- CREATED -> CONFIRMED -> SHIPPED -> DELIVERED, or CREATED -> CANCELLED; repeated/invalid transitions return 409.
+- Deduct stock at creation only; cancel restores stock once. Fulfillment does not deduct stock again.
+- Manual restock and paginated inventory history with initial/deduction/cancellation/restock movements.
+- Optional persistent Idempotency-Key scoped to the authenticated user, including concurrent retries and rollback recovery.
+- CUSTOMER registration, BCrypt password hashes, short-lived JWT login, role authorization, and database ownership checks.
+- Explicit operator-only admin bootstrap, structured errors, DTO-only responses, Swagger documentation, and an opt-in local demo.
 
 ## Architecture
 
 ```mermaid
 flowchart LR
-    Client[Client] -->|HTTP / JSON| Controller[Controller]
-    Controller -->|Request DTO| Service[Service]
-    Service -->|Transactional operations| Repository[Repository]
-    Repository -->|JPA / SQL| DB[(PostgreSQL)]
+    Client[Client] --> Security[Spring Security JWT and role checks]
+    Security --> Controller[Controller and validated DTO]
+    Controller --> Service[Service: authorization and transaction]
+    Service --> Repository[Repository: JPA or JDBC]
+    Repository --> DB[(PostgreSQL)]
 ```
 
-Controllers validate HTTP input and return response DTOs. Services own business rules, transaction boundaries, stock changes, and DTO mapping. Repositories provide persistence operations and locked queries. A shared `@RestControllerAdvice` maps exceptions to HTTP errors. Dependencies use constructor injection; entities are never returned directly by controllers.
+Controllers define HTTP contracts. Services enforce method permissions and order ownership as well as business rules. Repositories execute SQL filtering/pagination and pessimistic locks. Constructor injection is used throughout; Lombok is not used. Entities and password hashes are never returned directly. `open-in-view=false` keeps lazy access inside service transactions.
 
-```text
-src/main/java/com/example/ordermanagement/
-  config/       OpenAPI metadata and reusable error responses
-  common/       Error handling and pagination DTO
-  product/      Product entity, DTOs, repository, service, controller
-  inventory/    Immutable stock movement entity, DTOs, repository, history query
-  order/        Order/item entities, DTOs, services, idempotency coordination, repositories, controller
-src/main/resources/
-  application.yml
-  db/migration/V1__create_order_management_tables.sql
-  db/migration/V2__index_products_price_id.sql
-  db/migration/V3__extend_order_lifecycle_statuses.sql
-  db/migration/V4__create_stock_movements.sql
-  db/migration/V5__order_creation_idempotency.sql
-src/test/java/com/example/ordermanagement/
-  product/      Mockito service tests
-  order/        Mockito business tests
-  web/          MockMvc controller tests
-  integration/  PostgreSQL persistence, rollback, locking, and API tests
-scripts/
-  load-env.ps1  Load local configuration into the current process environment
-  run-local.ps1 Start PostgreSQL, wait for readiness, and run the API
-  demo.ps1      Explicit local-only API demo; no automatic database seed
-```
+JWT authentication uses Spring Security's bearer-token filter. [JwtConfig](src/main/java/com/example/ordermanagement/security/JwtConfig.java) pins HS256 and validates timestamps, issuer, audience, subject, and role. [SecurityConfig](src/main/java/com/example/ordermanagement/security/SecurityConfig.java) also verifies that the database user still exists and the role still matches the token. This adds a database read per authenticated HTTP request; there is no HTTP session or token cache.
+
+Packages: `auth/` contains user persistence, DTOs, login/registration, and bootstrap; `security/` contains JWT and authorization configuration; `product/`, `order/`, and `inventory/` contain business code; `common/` contains errors and page DTOs; `config/` contains OpenAPI configuration.
 
 ## Database Schema and Relationships
 
 ```mermaid
 erDiagram
-    products ||--o{ order_items : referenced_by
+    app_users o|--o{ customer_orders : owns
     customer_orders ||--|{ order_items : contains
-    products ||--o{ stock_movements : inventory_history
-    customer_orders o|--o{ stock_movements : optional_reference
+    products ||--o{ order_items : referenced_by
+    products ||--o{ stock_movements : history
+    customer_orders o|--o{ stock_movements : reference
+    app_users o|--o{ order_idempotency : key_scope
     customer_orders ||--o| order_idempotency : creation_receipt
-
-    products {
-        bigint id PK
-        varchar name
-        varchar description
-        numeric price
-        integer stock_quantity
-    }
-
-    customer_orders {
-        bigint id PK
-        varchar status
-        numeric total_amount
-        timestamptz created_at
-    }
-
-    order_items {
-        bigint id PK
-        bigint order_id FK
-        bigint product_id FK
-        integer quantity
-        numeric unit_price
-        numeric subtotal
-    }
-
-    order_idempotency {
-        varchar idempotency_key PK
-        text request_payload
-        bigint order_id FK,UK
-        text response_body
-        timestamptz created_at
-    }
-
-    stock_movements {
-        bigint id PK
-        bigint product_id FK
-        varchar movement_type
-        integer quantity_delta
-        integer stock_before
-        integer stock_after
-        bigint reference_order_id FK
-        varchar reason
-        timestamptz created_at
-    }
 ```
 
-- `CustomerOrder` has one or more `OrderItem` records. Each item references exactly one order and one product.
-- `(order_id, product_id)` is unique, so a product appears once per order.
-- Item `unit_price` and `subtotal` are snapshots; changing a product's price does not change existing orders.
-- Prices use `NUMERIC(19,2)`; subtotals and order totals use `NUMERIC(25,2)`. `createdAt` is an `Instant` stored as a timestamp with time zone.
-- Foreign keys and check constraints protect relationships, quantities, and monetary values. The order table is named `customer_orders` to avoid the SQL keyword `order`.
+| Table | Key fields and constraints |
+| --- | --- |
+| `app_users` | Identity ID, unique normalized email, 60-character BCrypt hash, CUSTOMER/ADMIN role, created_at |
+| `products` | Name/description, NUMERIC(19,2) price, nonnegative INTEGER stock |
+| `customer_orders` | Status CHECK, NUMERIC(25,2) total, created_at, nullable legacy user_id FK |
+| `order_items` | Order/product FKs, positive quantity, price/subtotal snapshots; unique (order_id, product_id) |
+| `stock_movements` | Signed delta, stock before/after, type, optional order/reason, timestamp; balance/type CHECKs |
+| `order_idempotency` | Surrogate ID, user FK, client key, canonical payload, order FK, JSON response snapshot, timestamp |
 
-See [V1](src/main/resources/db/migration/V1__create_order_management_tables.sql) for the base schema, [V2](src/main/resources/db/migration/V2__index_products_price_id.sql) for the price index, and [V3](src/main/resources/db/migration/V3__extend_order_lifecycle_statuses.sql) for the five allowed order status values. V3 replaces the status CHECK constraint without rewriting existing order or inventory data. The original migrations remain unchanged. Flyway applies migrations at startup; Hibernate validates the mapping with `ddl-auto=validate`.
+Migration [V6](src/main/resources/db/migration/V6__users_order_ownership_and_scoped_idempotency.sql) adds users and ownership without changing old prices, statuses, stock, or journal entries. Existing orders retain `user_id = NULL` and are ADMIN-only; no owner or account is invented. New orders require an owner in the entity factory/service. The column remains nullable to preserve legacy data and allow legacy lifecycle updates; direct SQL is outside application authorization.
 
-[V4](src/main/resources/db/migration/V4__create_stock_movements.sql) adds the inventory journal, restrictive product/order foreign keys, balance/type constraints, and indexes. It does not change existing product stock or backfill historical movements.
+Old idempotency receipts are retained with NULL user_id and their exact payload/response text. They are archived outside authenticated users' replay scope. New calls use a partial unique index on `(user_id, idempotency_key)`; a separate partial unique index preserves legacy-key uniqueness. An old unscoped key does not recover an old order after this security upgrade. ADMIN can inspect that order by its ID. V1-V5 remain unchanged.
 
-[V5](src/main/resources/db/migration/V5__order_creation_idempotency.sql) adds `order_idempotency`. The key's primary-key B-tree arbitrates concurrent claims and supports exact lookup; the unique order foreign-key index supports receipt/order lookup without a redundant index. Full canonical request text avoids hash-collision ambiguity. The original response DTO is stored as JSON text, preserving decimal values and timestamps when replayed. An order has zero or one receipt; a committed receipt references exactly one order. A deferred constraint trigger rejects incomplete reservations at commit. Existing orders are unchanged and receive no invented keys. No timestamp index is added because there is no expiry/cleanup query.
+User/order foreign keys use RESTRICT, with no cascade deletion of users/history. A user_id index supports order FK checks; the scoped key index also covers receipt user FK lookups. Stock history uses `(product_id, created_at DESC, id DESC)`. The price/ID index supports selective price pages. No plain name index is claimed to accelerate `%keyword%`; pg_trgm is not installed. See [ProductSearchIT](src/test/java/com/example/ordermanagement/integration/ProductSearchIT.java) for generated SQL and measured query plans, not a throughput benchmark.
 
 ## API Endpoints
 
-Default base URL: `http://localhost:8080`. Request and response bodies use JSON.
+Base URL: `http://localhost:8080`. JSON bodies. Supply `Authorization: Bearer <access-token>` on protected endpoints.
 
-| Method | Endpoint | Description | Success |
+| Method | Endpoint | Permission | Success |
 | --- | --- | --- | --- |
-| POST | `/api/products` | Create a product | 201 + `Location` |
-| GET | `/api/products?page=0&size=20` | Search, filter, sort, and paginate products | 200 |
-| GET | `/api/products/{id}` | Get a product | 200 |
-| PUT | `/api/products/{id}` | Replace editable product fields | 200 |
-| DELETE | `/api/products/{id}` | Delete a product without order references or inventory history | 204, empty body |
-| POST | `/api/products/{id}/restock` | Add positive stock with a reason | 200 |
-| GET | `/api/products/{id}/stock-movements` | Paginated inventory history, sorted by time | 200 |
-| POST | `/api/orders` | Create an order; optional `Idempotency-Key` | 201 first creation, 200 replay; both include `Location` |
-| GET | `/api/orders/{id}` | Get an order and its items | 200 |
-| POST | `/api/orders/{id}/confirm` | Confirm a CREATED order | 200 |
-| POST | `/api/orders/{id}/ship` | Mark a CONFIRMED order as handed to the carrier | 200 |
-| POST | `/api/orders/{id}/deliver` | Mark a SHIPPED order as delivered | 200 |
-| POST | `/api/orders/{id}/cancel` | Cancel a CREATED order and restore stock | 200 |
+| POST | `/api/auth/register` | Public; always creates CUSTOMER | 201 |
+| POST | `/api/auth/login` | Public | 200, access token |
+| GET | `/api/products` | Public | 200, page |
+| GET | `/api/products/{id}` | Public | 200 |
+| POST | `/api/products` | ADMIN | 201 + Location |
+| PUT | `/api/products/{id}` | ADMIN; keep current stock unchanged | 200 |
+| DELETE | `/api/products/{id}` | ADMIN; no order/movement references | 204, empty body |
+| POST | `/api/products/{id}/restock` | ADMIN | 200 |
+| GET | `/api/products/{id}/stock-movements` | ADMIN | 200, page |
+| POST | `/api/orders` | CUSTOMER or ADMIN; owner from principal | 201, or 200 replay |
+| GET | `/api/orders/{id}` | CUSTOMER owner or ADMIN | 200 |
+| POST | `/api/orders/{id}/confirm` | ADMIN; CREATED -> CONFIRMED | 200 |
+| POST | `/api/orders/{id}/ship` | ADMIN; CONFIRMED -> SHIPPED | 200 |
+| POST | `/api/orders/{id}/deliver` | ADMIN; SHIPPED -> DELIVERED | 200 |
+| POST | `/api/orders/{id}/cancel` | ADMIN; CREATED -> CANCELLED | 200 |
 
-Pagination starts at page `0`; page size must be between `1` and `100`. Products are sorted by ID ascending unless `sort` is supplied. `PUT` requires `name`, `price`, and `stockQuantity`; `description` is optional. Since V4, PUT must keep stockQuantity equal to the locked current stock; a different value returns `409`. Use restock to add stock, rather than replacing an absolute stock value and bypassing the journal.
+Customer lookups use `findByIdAndUserId`; another customer's order and an absent order both return 404. ADMIN reads any order, including legacy unowned records. HTTP routes and service `@PreAuthorize` checks enforce roles. No client `role` or `userId` can override this: unknown JSON fields are rejected.
+
+### Validation, HTTP status, and errors
+
+- Registration: normalized (trimmed/lowercased) email up to 254 characters; nonblank password 12-72 characters and at most 72 UTF-8 bytes. Passwords are never trimmed. Login validates email, nonblank password, and the same byte ceiling. Duplicate normalized emails return 409, including concurrent inserts.
+- Product: nonblank name <=120, optional description <=2000, price >=0.01 with at most 12 integer/2 fractional digits, stock 0..2147483647. PUT cannot replace stock; changed stock returns 409.
+- Order: 1-100 distinct non-null items, positive product IDs, integer quantity 1..1000000. Prices/totals are server-calculated. Missing products return 404; insufficient stock returns 409.
+- Restock: quantity 1..2147483647, required trimmed reason <=500; resulting stock must fit INTEGER. Successful restock is not idempotent and adds stock again if repeated.
+- Search: optional `keyword` (trimmed, <=120, literal case-insensitive substring), inclusive nonnegative `minPrice`/`maxPrice` with min <= max, `inStock=true` (>0), false (=0), or omitted. All filters combine with AND.
+- Pages: page >=0, size 1..100, page*size <=2147483647. Product defaults: page=0,size=20,sort=id,asc; sort fields id/name/price/stockQuantity, optional asc/desc. Non-ID sorts add ID ascending. History permits only createdAt,asc or createdAt,desc (default desc), with ID in the same direction for ties.
+
+Errors use ApiError: `timestamp`, `status`, `error`, `message`, `path`, `fieldErrors`. 400 means invalid input; 401 means missing/invalid/expired bearer token or invalid credentials; 403 means authenticated but lacking role permission; 404 means absent/not-owned resource; 409 means business/idempotency/locking conflict; 500 hides internal details. Protected routes authenticate before validating business input. Authentication database/backend failures return generic 500 rather than misclassifying an outage as invalid credentials. Invalid login credentials have the same generic message whether the email exists or not. Registration intentionally reports duplicate emails with 409. Successful login is `Cache-Control: no-store`; no session cookie is issued.
 
 ### Idempotent order creation
 
-```http
-POST /api/orders
-Content-Type: application/json
-Idempotency-Key: checkout-example-1
+Optional `Idempotency-Key`: 1-128 case-sensitive ASCII letters/digits or `.`, `_`, `:`, `-`, exactly one value without spaces. Scope is the authenticated user. Without it, each successful request creates a new order. New key: 201 + Location + `Idempotency-Replayed: false`. Same user/key/equivalent payload: 200 + Location + `Idempotency-Replayed: true`, returning the original creation snapshot without another stock/journal write. A different valid payload for that user/key returns 409. Different users may reuse the same key independently.
 
-{"items":[{"productId":1,"quantity":2}]}
-```
+Payload identity is the sorted set of `(productId,quantity)` pairs; JSON whitespace, property ordering, and item ordering are insignificant. Duplicates still return 400. Replays keep original prices and CREATED status even after cancellation/fulfillment; GET returns current state. Keys are retained indefinitely; deletion/expiry is not implemented. Restock does not support keys.
 
-Choose a fresh key for each intended order (for example, a client-generated UUID), and keep that key and payload for retries. Keys are case-sensitive, 1–128 ASCII letters/digits or `.`, `_`, `:`, `-`; empty, whitespace, unsupported characters, and multiple key headers return `400`. Keys are globally scoped to this endpoint across all clients; the project has no authentication. A future authenticated API must scope keys to the authenticated principal/tenant. Keyed requests still run normal DTO and service validation.
-
-| Situation | HTTP result | Database effect |
-| --- | --- | --- |
-| No header | `201 Created`, existing behavior | Every successful call creates a new order |
-| New key, valid request | `201 Created`, `Idempotency-Replayed: false` | One order, stock deduction, inventory movements, and completed receipt |
-| Same key and equivalent valid payload | `200 OK`, `Idempotency-Replayed: true` | Returns the stored creation response; no stock or journal write |
-| Same committed key, different valid payload | `409 Conflict` | No new order or inventory change |
-| Owner still running | Waits on PostgreSQL; a lock wait exceeding five seconds returns `409` | Client retries the same key/payload; no committed pending reservation |
-| Creation fails | Normal `400`/`404`/`409`/`500` error as applicable | All transaction writes, including the claim, roll back; failures are not cached |
-
-Both keyed success responses include `Location: /api/orders/{id}` and the same creation-response fields shown in [Create Order](#create-order). Replay uses `200` because this call retrieves an existing result. The snapshot retains its original `CREATED` status even if the order has since been confirmed or cancelled; use `GET /api/orders/{id}` for its current state. A retry after cancellation does **not** revive the order or deduct stock again.
-
-Payload equivalence uses the validated set of `(productId, quantity)` pairs sorted by product ID. Item ordering, JSON property ordering, and whitespace are insignificant; changing a product or quantity conflicts. Duplicate products and invalid payloads still return `400`. Current catalog prices are not part of the client payload: replay keeps the original prices and totals even after a price change.
-
-`IdempotentOrderService.create()` opens a READ COMMITTED transaction. Its JDBC repository claims the primary key with `INSERT ... ON CONFLICT DO NOTHING` **before product locks**. A winning insert calls the existing `OrderService.create()` through its Spring proxy; REQUIRED joins the outer transaction. `JdbcTemplate` and Hibernate share the same datasource connection through `JpaTransactionManager`. Completion records the order FK and serialized response before commit; any failure, including flush/commit failure, rolls everything back.
-
-For concurrent claims, PostgreSQL waits for the competing transaction. After its commit, the losing INSERT returns no inserted row, and a **separate SELECT statement** sees the completed receipt using a fresh READ COMMITTED snapshot. After its rollback, the waiting insert can claim the key and create the order. Catching a unique-constraint exception and querying inside the already-aborted PostgreSQL transaction is deliberately avoided. See [unique-index concurrency](https://www.postgresql.org/docs/17/index-unique-checks.html) and [READ COMMITTED / ON CONFLICT behavior](https://www.postgresql.org/docs/17/transaction-iso.html).
-
-No durable PROCESSING state or separate reservation transaction exists. The deferred database trigger prevents committing an unfinished claim; disconnect/crash rollback releases an abandoned uncommitted claim. The existing five-second lock timeout bounds a waiting caller, rather than reclaiming a still-live owner's transaction. An indefinitely stalled live session still needs database session/statement timeout policy or operator termination; no automatic lease takeover is implemented. A production deployment should configure appropriate PostgreSQL `idle_in_transaction_session_timeout`/`statement_timeout` values for its workload.
-
-Receipts are retained indefinitely; expiry and cleanup are not implemented. Deleting a receipt would permit that key to create another order. Reusing another key or omitting the header creates a separate order, and restock has no idempotency support. This provides atomic deduplication for retained keys in this database, **not an exactly-once guarantee under all conditions**. A client that loses a response after commit can retry the same key to recover the stored result. See [requests.http](requests.http), examples 52–58.
+The coordinator claims `(user_id,key)` with `INSERT ... ON CONFLICT DO NOTHING` before product locks in READ COMMITTED. A competing insert waits for commit/rollback; a separate SELECT statement obtains the newly committed receipt. Rollback lets a waiting request claim and create. OrderService joins the coordinator's REQUIRED transaction; JDBC and Hibernate share it. A deferred database trigger rejects incomplete reservations at commit. Failures are not cached; a five-second lock timeout returns retryable 409 (Spring's PostgreSQL SQLSTATE translator handles 55P03). An indefinitely stalled live owner still needs database timeout/operator intervention; no lease takeover is implemented. These guarantees apply to retained receipts in this database, not exactly-once in all conditions. See [PostgreSQL unique checks](https://www.postgresql.org/docs/17/index-unique-checks.html) and [READ COMMITTED](https://www.postgresql.org/docs/17/transaction-iso.html).
 
 ### Stock adjustment and inventory history
 
-```http
-POST /api/products/1/restock
-Content-Type: application/json
-
-{"quantity":5,"reason":"Supplier delivery"}
-```
-
-`quantity` is an integer from 1 to 2,147,483,647, and the resulting stock must remain within that range (zero remains valid as an existing stock value). `reason` is required, trimmed, nonblank, and at most 500 characters. Invalid input returns `400`, a missing product returns `404`, and stock overflow returns `409`. Success returns `200` with the updated ProductResponse. Retrying a successful restock adds stock again; `Idempotency-Key` is supported only for order creation, not restock.
-
-```http
-GET /api/products/1/stock-movements?page=0&size=20&sort=createdAt,desc
-GET /api/products/1/stock-movements?page=1&size=10&sort=createdAt,asc
-```
-
-History uses the existing PageResponse shape. Defaults are page 0, size 20, latest first. Only `createdAt` sorting is supported, with `asc` or `desc`; omitted direction means `desc`. ID is appended in the same direction to resolve timestamp ties. Page/size/offset validation matches the product list. A missing product returns `404`; an existing legacy product with no movements returns `200` with empty content. Offset pages can shift when new movements arrive.
-
-Each movement returns `id`, `productId`, `type`, signed `quantityDelta`, `stockBefore`, `stockAfter`, nullable `referenceOrderId`, nullable `reason`, and `createdAt`:
-
-| Type | Delta | Order reference | Reason |
-| --- | --- | --- | --- |
-| INITIAL_STOCK | Initial stock, including zero; before is 0 | None | None |
-| ORDER_DEDUCTION | Negative ordered quantity | Required | None |
-| ORDER_CANCELLATION | Positive restored quantity | Required | None |
-| MANUAL_RESTOCK | Positive added quantity | None | Required |
-
-New products receive an opening entry in the same transaction as product creation, even when initial stock is zero. Create-order and cancel write one movement per product in their existing transactions; fulfillment actions do not write movements. Restock locks the product before reading its stock and writes both the increment and movement in one transaction. There is no separate transaction, asynchronous writer, message broker, or application compensation step: failure rolls back stock, journal, and any order changes together.
-
-**History retention and compatibility:** movements have no update/delete API, no setters, immutable scalar snapshots, and Hibernate `@Immutable`. Product and order foreign keys use ON DELETE RESTRICT. Product DELETE returns `409` if any movement exists, including INITIAL_STOCK; therefore newly created products cannot be physically deleted. A pre-V4 product without order references or movements can still be deleted with `204`. PUT no longer changes stock directly. These intentional contract changes prevent unrecorded stock replacement and deletion of history. Direct SQL performed by a database administrator is outside the application's append-only contract; the journal is not a tamper-proof ledger.
-
-**No historical backfill:** V4 starts with an empty journal and leaves all previous stock/order data unchanged. Existing products gain entries only when future stock operations occur; their first entry may be a deduction or cancellation with the actual current before/after stock. Cancelling an old CREATED order records its reversal without inventing a past deduction. Summing journal deltas alone does not reconstruct the stock of legacy products, and this feature does not claim a complete pre-V4 audit trail. createdAt records when the movement object was created after taking the stock lock, not the transaction's commit time.
-
-### Product Search & Filtering
-
-All query parameters on `GET /api/products` are optional. Existing calls without filters keep the same defaults and `PageResponse` JSON shape.
-
-| Parameter | Behavior | Default |
-| --- | --- | --- |
-| `keyword` | Case-insensitive substring of **name**; surrounding whitespace is trimmed; blank means no search; at most 120 characters | No filter |
-| `minPrice` | Inclusive lower price bound, `BigDecimal`, must be nonnegative | No lower bound |
-| `maxPrice` | Inclusive upper price bound, `BigDecimal`, must be nonnegative and at least `minPrice` when both are set | No upper bound |
-| `inStock` | `true`: stock > 0; `false`: stock = 0; omitted: either | No filter |
-| `page` | Zero-based page number, must be nonnegative | `0` |
-| `size` | Page size, from 1 to 100 | `20` |
-| `sort` | One `field[,asc\|desc]`; allowed fields: `id`, `name`, `price`, `stockQuantity`; direction is case-insensitive and defaults to `asc` | `id,asc` |
-
-Filters combine with **AND**. A non-ID sort appends `id,asc` to give equal-valued products a deterministic order. Name sorting follows the database collation. Concurrent catalog changes can still move records between offset-based pages.
-
-The keyword is literal text: `%`, `_`, and `!` are escaped for SQL `LIKE`, and values are bound through JPA. URL-encode special characters (for example, use `keyword=50%25` to search for `50%`). Unsupported sort fields/directions, invalid types, negative prices, reversed ranges, or invalid page bounds return the existing `400` error shape. `page * size` must also fit JPA's maximum offset of `2,147,483,647`; larger offsets are rejected before executing a query.
-
-```http
-GET /api/products?keyword=KEYboard&minPrice=20&maxPrice=100&inStock=true&page=0&size=10&sort=price,asc
-GET /api/products?maxPrice=30&sort=name,desc
-GET /api/products?inStock=false
-```
-
-`totalElements` and `totalPages` describe the filtered result. Empty searches and pages beyond the last page return `200` with an empty `content` array. Bounds are compared exactly without rounding; `minPrice=19.990&maxPrice=19.99` is a valid equal-price range.
-
-| Status | Meaning |
-| --- | --- |
-| 400 | Invalid JSON, validation failure, duplicate product IDs, or invalid pagination/IDs |
-| 404 | Product or order not found |
-| 409 | Invalid/repeated state transition, insufficient stock, referenced product deletion, lock/database conflict, or stock restoration overflow |
-| 500 | Unexpected server error; internal exception details are not returned |
-
-Product names must be nonblank and at most 120 characters; descriptions allow up to 2,000 characters. Prices must be at least `0.01`, with at most 12 integer digits and 2 decimal places. Stock is a nonnegative Java integer. An order accepts 1–100 distinct products, with integer quantities from 1 to 1,000,000. Unknown JSON properties and fractional values for integer fields are rejected.
-
-### Order lifecycle and concurrency
-
-```mermaid
-stateDiagram-v2
-    [*] --> CREATED
-    CREATED --> CONFIRMED: confirm
-    CONFIRMED --> SHIPPED: ship
-    SHIPPED --> DELIVERED: deliver
-    CREATED --> CANCELLED: cancel
-    DELIVERED --> [*]
-    CANCELLED --> [*]
-```
-
-| Current status | Action | New status | Inventory change |
-| --- | --- | --- | --- |
-| CREATED | `POST /api/orders/{id}/confirm` | CONFIRMED | None |
-| CONFIRMED | `POST /api/orders/{id}/ship` | SHIPPED | None |
-| SHIPPED | `POST /api/orders/{id}/deliver` | DELIVERED | None |
-| CREATED | `POST /api/orders/{id}/cancel` | CANCELLED | Restore ordered quantities once |
-
-These are the only allowed transitions. DELIVERED and CANCELLED are terminal states. Skipping a step, moving backwards, repeating an action, or cancelling after confirmation returns `409` without changing stock/status. The new action endpoints accept no request body and return the existing `OrderResponse` DTO with `200`; missing IDs return `404`, and invalid path IDs return `400`. Existing create/read/cancel endpoints keep their response shapes and behavior for CREATED/CANCELLED orders, including the repeated-cancellation message.
-
-`OrderStatus.canTransitionTo` defines the transition rules, and `CustomerOrder` enforces them before mutation. Each public service action is a write `@Transactional` method and uses `OrderRepository.findByIdForUpdate` (`PESSIMISTIC_WRITE`) **before** checking status. Hibernate dirty checking persists the status before transaction completion; a runtime persistence failure rolls the transaction back.
-
-Stock is deducted only during order creation. Confirm/ship/deliver do not acquire product write locks or modify stock, item prices, totals, or creation time. Cancellation locks the order first, checks CREATED, then locks products in ascending ID order before restoring stock. Creation locks existing products in ascending ID order and inserts a new order; it does not acquire an existing order lock after product locks. This keeps the existing lock order and reduces deadlock risk without claiming deadlocks are impossible.
-
-At PostgreSQL's default READ COMMITTED isolation, a competing action waits for the order lock, then validates the committed status. If confirm commits first, cancel returns `409` and stock stays deducted. If cancel commits first, confirm returns `409` and stock is restored once. Duplicate confirm/ship/deliver requests have one success and one conflict. Adjacent actions can both succeed when their lock order produces a valid sequence, such as confirm then ship; a ship request that executes while the order is still CREATED fails. Locks last until commit/rollback, and the existing five-second lock timeout maps lock conflicts to `409`. See [PostgreSQL isolation](https://www.postgresql.org/docs/17/transaction-iso.html) and [locking](https://www.postgresql.org/docs/17/explicit-locking.html).
-
-These endpoints record fulfillment state; no carrier integration, payment processing, delivery timestamps, or status history is implemented. The database CHECK validates status membership; transition legality is enforced by the application, so direct SQL can bypass lifecycle rules.
+INITIAL_STOCK records opening stock, including zero; ORDER_DEDUCTION is negative with an order reference; ORDER_CANCELLATION is positive with an order reference; MANUAL_RESTOCK is positive with a reason. Every movement stores before/after snapshots and createdAt. No prior history is backfilled for legacy products. History is immutable through the API, not a tamper-proof audit system against database operators. Referenced products cannot be deleted, so new products with opening history return 409 on deletion; only unused legacy products can return 204.
 
 ## How to Run
 
-### Prerequisites
+Requirements: JDK 21 for host execution; Docker Desktop in Linux-container mode with Compose v2/BuildKit; internet for first dependencies/images. No separate Maven installation is needed. Clone `https://github.com/22127433/order-management-api.git` and run commands from its root.
 
-- JDK 21 for running the application locally.
-- Docker Desktop / Docker Engine running, with Docker Compose v2.
-- Internet access for the initial Maven dependency and container image downloads.
-
-A separate Maven installation is not required. Run commands from the project root, where `pom.xml` is located.
-
-Clone this repository using its GitHub **Code → HTTPS** URL, then open the cloned directory:
+### Windows: initialize secrets and provision the first admin
 
 ```powershell
-git clone https://github.com/22127433/order-management-api.git
-Set-Location order-management-api
-java -version
-docker compose version
+.\scripts\init-local.ps1
+notepad .env
 ```
 
-Create your own configuration from the committed template. Local `.env`, build output, and credentials are excluded from version control.
+The initializer copies `.env.example` if necessary and generates a cryptographically random 32-byte Base64 JWT key only if missing/empty. It preserves an existing key and does not print it. In your ignored `.env`, set POSTGRES_PASSWORD. To provision an admin on first startup, set BOOTSTRAP_ADMIN_ENABLED=true and provide your own BOOTSTRAP_ADMIN_EMAIL and BOOTSTRAP_ADMIN_PASSWORD (same validation as registration). There are no default credentials. Quote values containing `$` or `#` with single quotes. Never commit `.env`, JWTs, or actual credentials.
+
+Bootstrap is disabled by default. When explicitly enabled, it creates ADMIN with BCrypt. It refuses to promote an existing CUSTOMER and never resets an existing admin password silently. After the first successful startup, set BOOTSTRAP_ADMIN_ENABLED=false and clear BOOTSTRAP_ADMIN_PASSWORD in `.env`; restart/recreate the API. Existing admin credentials keep working. No role-changing or password-reset endpoint is implemented.
 
 ### Windows: PostgreSQL in Docker, API on the host
 
-1. Create local configuration:
-
-   ```powershell
-   Copy-Item .env.example .env
-   ```
-
-2. Open `.env` and set `POSTGRES_PASSWORD` to your own local database password. The template intentionally leaves it empty. If the password contains `$` or `#`, wrap the value in single quotes. Keep the other defaults for the first run.
-
-3. Load the variables and start PostgreSQL:
-
-   ```powershell
-   .\scripts\load-env.ps1
-   docker compose up -d
-   docker compose ps
-   ```
-
-   Wait until PostgreSQL is reported as `healthy`. With no profile enabled, Compose starts only the database.
-
-4. Start the API in the same PowerShell session:
-
-   ```powershell
-   .\mvnw.cmd spring-boot:run
-   ```
-
-   Once Spring Boot reports that the application has started, open [Swagger UI](http://localhost:8080/swagger-ui/index.html), use `http://localhost:8080/api/products`, or open [requests.http](requests.http). The root path `/` is not an API endpoint.
-
-Spring Boot does not automatically load `.env` when launched by Maven. [load-env.ps1](scripts/load-env.ps1) reads values as data and sets process environment variables; it does not evaluate the file as PowerShell code. In Windows Command Prompt, the Maven command is `mvnw.cmd spring-boot:run`, after setting the equivalent environment variables in that session.
-
-The existing convenience script performs configuration loading, database startup, readiness checking, and API startup in one command:
-
 ```powershell
-.\scripts\run-local.ps1
+.\scripts\load-env.ps1
+docker compose up -d --wait postgres
+.\mvnw.cmd spring-boot:run
 ```
 
-If PowerShell policy blocks local scripts, use the Docker-only option below or set the environment variables in your shell before invoking Maven.
+Or use `.\scripts\run-local.ps1`. Spring Boot launched through Maven does not automatically load `.env`; the loader safely reads values as data into this process environment. Reload after editing it. Database-only `docker compose up -d` keeps working without JWT configuration. For an existing database, set DB_HOST/DB_PORT and use `run-local.ps1 -SkipDatabase`.
 
-### Run both services in Docker
+### Windows: both API and PostgreSQL in Docker
 
-After configuring `.env`, Java does not need to be installed on the host:
+After configuring `.env`, no host JDK is required:
 
 ```powershell
 docker compose --profile app up -d --build --wait
 docker compose logs -f api
 ```
 
-The existing optional `app` profile starts PostgreSQL first and waits for database health. The API healthcheck calls `/actuator/health`, so `--wait` also checks API readiness. The default command without a profile still starts only PostgreSQL. The Dockerfile uses a Maven 3.9.11/Java 21 multi-stage build with a BuildKit Maven cache, runs unit/MVC tests during packaging, and uses a non-root runtime user; PostgreSQL integration tests run separately with the integration profile. No host JDK is needed for this option.
+Default Compose without the app profile starts only PostgreSQL. The app profile waits for database health, then checks API `/actuator/health`. Dockerfile uses Maven 3.9.11/Java 21, a BuildKit Maven cache, unit/MVC tests during packaging, and a non-root Java 21 runtime. PostgreSQL integration tests run separately. Host ports bind to 127.0.0.1.
+
+After changing bootstrap flags/password in `.env`, recreate the API with `docker compose --profile app up -d --wait api`. Stop containers while retaining data with `docker compose --profile app down`. The postgres_data volume persists data; changing POSTGRES_PASSWORD in `.env` does not change an initialized database's password. If ports are busy, adjust POSTGRES_PORT/SERVER_PORT before startup. Stop host Java with Ctrl+C.
 
 ### Swagger UI and health
 
-| Local URL | Purpose |
-| --- | --- |
-| [Swagger UI](http://localhost:8080/swagger-ui/index.html) | Interactive Product, Order, and Inventory documentation |
-| [OpenAPI JSON](http://localhost:8080/v3/api-docs) | Machine-readable OpenAPI 3.0 specification |
-| [OpenAPI YAML](http://localhost:8080/v3/api-docs.yaml) | YAML representation of the same API |
-| [Health](http://localhost:8080/actuator/health) | `200 {"status":"UP"}` when healthy; `503` when health is DOWN |
+- [Swagger UI](http://localhost:8080/swagger-ui/index.html): run register/login, then click **Authorize** and paste only the returned accessToken (Swagger adds Bearer). Use CUSTOMER or ADMIN credentials for the operation's permission.
+- [OpenAPI JSON](http://localhost:8080/v3/api-docs), [YAML](http://localhost:8080/v3/api-docs.yaml): 15 documented business operations with DTOs, errors, and security requirements.
+- [Health](http://localhost:8080/actuator/health): status only, 200 UP / 503 DOWN. Other management endpoints are not exposed and security denies their requests (401 without authentication, 403 when authenticated). Environment/configprops/heapdump are not public. JMX endpoints and probes are disabled.
 
-Swagger documents all 13 business operations, request/response DTOs, query constraints, allowed lifecycle transitions, Idempotency-Key replay behavior, success headers/statuses, and the shared ApiError format. Schema example IDs are illustrative: use IDs returned by your own create requests or the demo script. Swagger's **Try it out** sends real requests to the running API and can change its data.
+Set API_DOCS_ENABLED=false to disable both Swagger and the spec. Authorization is not persisted by Swagger across reloads. Public endpoints can still return 401 if an invalid bearer token is explicitly supplied. The root `/` is not an API endpoint.
 
-Only Actuator health is exposed over HTTP. Health components/details are hidden; `/actuator/env`, `/actuator/configprops`, `/actuator/beans`, `/actuator/metrics`, and other management endpoints are not exposed. JMX endpoint exposure and health probes are disabled. Health is not a metrics dashboard or a guarantee of business correctness. Set `API_DOCS_ENABLED=false` in the process environment or `.env` to disable both Swagger UI and `/v3/api-docs`; reload the environment/restart Java, or recreate the API container. This setting does not add authentication.
+### Windows: guided local demo
 
-### Windows: guided demo
-
-With the API running, open a **second PowerShell terminal** in the project root:
+With the API running, open another PowerShell terminal:
 
 ```powershell
 .\scripts\demo.ps1
 ```
 
-For a custom host port:
+It prompts for the local ADMIN credential, logs in, registers a fresh CUSTOMER, and uses that customer for ordering/retries. ADMIN performs catalog, inventory, and lifecycle actions. It accepts loopback HTTP(S) URLs only; use `-BaseUrl http://localhost:8081` for a different port. It does not print passwords or JWTs. Each run intentionally adds one CUSTOMER, two products, and two orders; final keyboard stock is 24 with five movements. IDs and the non-secret idempotency key are printed for inspection as ADMIN in Swagger. These records remain; no startup product/order seed or automatic history deletion occurs.
 
-```powershell
-.\scripts\demo.ps1 -BaseUrl http://localhost:8081
-```
-
-The script accepts only loopback HTTP(S) URLs. It creates two demo products through the normal API, searches the catalog, updates metadata, creates an order with a fresh key, replays it, and checks a conflicting payload. It cancels that order and demonstrates that retry still returns the original snapshot. A separate order goes through confirmation, shipping, and delivery; restock and history follow. Expected validation, insufficient-stock, and protected-deletion errors are checked too.
-
-Each successful run adds **two products and two orders**; running it again intentionally creates another set. The printed result includes Product/Order IDs, the retry key, final keyboard stock **24**, and **five** keyboard inventory movements. Use those IDs in Swagger UI. Records remain in the local database: the script does not delete business history. It is opt-in, not a startup seed, migration seed, or production initialization mechanism. [requests.http](requests.http) remains available for step-by-step manual examples without running the script.
-
-### Configuration and stopping services
+### Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `POSTGRES_PASSWORD` | Required; no default | Database password |
-| `POSTGRES_DB` | `order_management` | Database name |
-| `POSTGRES_USER` | `order_app` | Database user |
-| `POSTGRES_PORT` | `5432` | Database port published on the host |
-| `DB_HOST` | `localhost` | Database host when running Java locally |
-| `DB_PORT` | `POSTGRES_PORT` | Database connection port when running Java locally |
-| `SERVER_PORT` | `8080` | API port on the host |
-| `API_DOCS_ENABLED` | `true` | Enable OpenAPI and Swagger UI; set false to disable both |
+| POSTGRES_PASSWORD | Required | Database password |
+| POSTGRES_DB / POSTGRES_USER | order_management / order_app | Database name/user |
+| POSTGRES_PORT / SERVER_PORT | 5432 / 8080 | Published host ports |
+| DB_HOST / DB_PORT | localhost / POSTGRES_PORT | Host Java database overrides |
+| JWT_SECRET_BASE64 | Required for API; no fallback | At least 32 random bytes, Base64-encoded |
+| BOOTSTRAP_ADMIN_ENABLED | false | Explicit one-time operator action |
+| BOOTSTRAP_ADMIN_EMAIL / BOOTSTRAP_ADMIN_PASSWORD | Empty | Operator-supplied bootstrap credentials |
+| API_DOCS_ENABLED | true | Swagger/spec toggle |
 
-Inside the API container, Compose sets `DB_HOST=postgres`, `DB_PORT=5432`, and the internal API port to `8080`. Host ports are bound to `127.0.0.1`. To use an existing PostgreSQL instance, set the local connection variables and run `scripts/run-local.ps1 -SkipDatabase`.
-
-Stop Java with `Ctrl+C`. Stop Compose services while retaining database data:
-
-```powershell
-docker compose --profile app down
-```
-
-The `postgres_data` volume persists data. Updating a password in `.env` does not change the password in an already initialized database. If a default port is occupied, change the corresponding port in `.env` and reload the environment before restarting.
-
-`.gitignore` excludes build output, local `.env` files, credentials, private keys, and IDE caches. `.env.example` remains versionable. Supply actual credentials through your local environment; the application has no hardcoded database password.
+Compose sets internal database host=postgres, port=5432, and API port=8080. JWT issuer/audience are order-management-api; TTL is 15m in application.yml. Configuration validates TTL from 1 minute to 1 hour. Invalid/missing signing keys fail startup. .gitignore and .dockerignore exclude real env files, credentials, private keys, caches, and build output.
 
 ## Example Requests & Responses
 
-The executable examples in [requests.http](requests.http) cover every endpoint and common error cases. Use the [VS Code REST Client](https://github.com/Huachao/vscode-restclient#request-variables) and run the numbered requests in order: named responses provide product/order IDs for later requests. They work with existing data and do not assume IDs start at 1. Re-running creation requests creates new records.
+[requests.http](requests.http) uses VS Code REST Client prompts for credentials so secrets need not be written into the tracked file. Register a CUSTOMER and run CUSTOMER/ADMIN login requests first, then numbered examples. Named responses supply actual IDs and tokens. Login again after access-token expiry. Swagger example IDs are illustrative, not existing records. The placeholders below must be replaced locally; do not commit real tokens/passwords.
 
-The responses below are illustrative. IDs, timestamps, and existing page contents depend on your database. The sequence assumes a new database where the two example products receive IDs `1` and `2`.
-
-### Create Product
+Register and log in:
 
 ```http
-POST http://localhost:8080/api/products
+POST /api/auth/register
 Content-Type: application/json
 
-{
-  "name": "Mechanical Keyboard",
-  "description": "USB keyboard",
-  "price": 59.90,
-  "stockQuantity": 20
-}
+{"email":"customer@example.com","password":"<YOUR_LOCAL_CUSTOMER_PASSWORD>"}
 ```
 
-Response: `201 Created`, `Location: /api/products/1`.
+201 returns only id, email, role=CUSTOMER, createdAt. POST `/api/auth/login` with the same fields returns 200:
 
 ```json
-{
-  "id": 1,
-  "name": "Mechanical Keyboard",
-  "description": "USB keyboard",
-  "price": 59.90,
-  "stockQuantity": 20
-}
+{"accessToken":"<ACCESS_TOKEN>","tokenType":"Bearer","expiresIn":900,"user":{"id":2,"email":"customer@example.com","role":"CUSTOMER","createdAt":"2026-11-18T06:00:00Z"}}
 ```
 
-Create the second product before placing the example order:
+Create Product (ADMIN):
 
 ```http
-POST http://localhost:8080/api/products
+POST /api/products
+Authorization: Bearer <ADMIN_ACCESS_TOKEN>
 Content-Type: application/json
 
-{"name":"Mouse","description":"USB mouse","price":19.99,"stockQuantity":10}
+{"name":"Keyboard","description":"USB","price":59.90,"stockQuantity":20}
 ```
 
-This returns `201 Created` with the same product response shape and, in this example, `id: 2`.
+201 + Location returns `{ "id":1,"name":"Keyboard","description":"USB","price":59.90,"stockQuantity":20 }`.
 
-### List Products
+List Products (public):
 
 ```http
-GET http://localhost:8080/api/products?page=0&size=10
+GET /api/products?keyword=KEYboard&minPrice=10&maxPrice=100&inStock=true&page=0&size=10&sort=price,asc
 ```
 
-Response: `200 OK`.
+200 returns `content`, zero-based `page`, `size`, filtered `totalElements`, `totalPages`, `last`.
 
-```json
-{
-  "content": [
-    {"id":1,"name":"Mechanical Keyboard","description":"USB keyboard","price":59.90,"stockQuantity":20},
-    {"id":2,"name":"Mouse","description":"USB mouse","price":19.99,"stockQuantity":10}
-  ],
-  "page": 0,
-  "size": 10,
-  "totalElements": 2,
-  "totalPages": 1,
-  "last": true
-}
-```
-
-### Create Order
+Create Order (CUSTOMER or ADMIN):
 
 ```http
-POST http://localhost:8080/api/orders
+POST /api/orders
+Authorization: Bearer <CUSTOMER_ACCESS_TOKEN>
+Idempotency-Key: checkout-example-1
 Content-Type: application/json
 
-{
-  "items": [
-    {"productId":1,"quantity":2},
-    {"productId":2,"quantity":1}
-  ]
-}
+{"items":[{"productId":1,"quantity":2}]}
 ```
 
-Response: `201 Created`, `Location: /api/orders/1`. Stock becomes `18` keyboards and `9` mice. The server computes `59.90 × 2 + 19.99 = 139.79`.
+Illustrative 201 response (assuming authenticated user ID 2):
 
 ```json
-{
-  "id": 1,
-  "status": "CREATED",
-  "totalAmount": 139.79,
-  "createdAt": "2026-11-12T05:00:00Z",
-  "items": [
-    {"id":1,"productId":1,"quantity":2,"unitPrice":59.90,"subtotal":119.80},
-    {"id":2,"productId":2,"quantity":1,"unitPrice":19.99,"subtotal":19.99}
-  ]
-}
+{"id":1,"status":"CREATED","totalAmount":119.80,"createdAt":"2026-11-18T06:01:00Z","items":[{"id":1,"productId":1,"quantity":2,"unitPrice":59.90,"subtotal":119.80}],"userId":2}
 ```
 
-### Get Order
+Get Order: `GET /api/orders/1` with its owner's token or an ADMIN token -> 200. A different CUSTOMER token -> 404. Cancel Order: `POST /api/orders/1/cancel` with ADMIN -> 200 CANCELLED, stock restored once; repeat -> 409. CUSTOMER cancellation -> 403. For a separate order, ADMIN calls confirm -> ship -> deliver; stock is unchanged by these actions.
 
-```http
-GET http://localhost:8080/api/orders/1
-```
-
-Response: `200 OK`, with the same order response shown above. Prices and totals remain unchanged if a product's current price is later edited.
-
-### Validation Error
-
-```http
-POST http://localhost:8080/api/orders
-Content-Type: application/json
-
-{"items":[{"productId":1,"quantity":0}]}
-```
-
-Response: `400 Bad Request`.
+Validation Error: creating an order with quantity=0 returns 400 after authentication:
 
 ```json
-{
-  "timestamp": "2026-11-12T05:01:00Z",
-  "status": 400,
-  "error": "Bad Request",
-  "message": "Request validation failed",
-  "path": "/api/orders",
-  "fieldErrors": [{"field":"items[0].quantity","message":"must be greater than 0"}]
-}
+{"timestamp":"2026-11-18T06:02:00Z","status":400,"error":"Bad Request","message":"Request validation failed","path":"/api/orders","fieldErrors":[{"field":"items[0].quantity","message":"must be greater than 0"}]}
 ```
 
-### Insufficient Stock Error
-
-After the successful order above, only 18 keyboards remain:
-
-```http
-POST http://localhost:8080/api/orders
-Content-Type: application/json
-
-{"items":[{"productId":1,"quantity":21}]}
-```
-
-Response: `409 Conflict`. No order is created and stock stays unchanged.
-
-```json
-{
-  "timestamp": "2026-11-12T05:02:00Z",
-  "status": 409,
-  "error": "Conflict",
-  "message": "Insufficient stock for product 1: requested 21, available 18",
-  "path": "/api/orders",
-  "fieldErrors": []
-}
-```
-
-### Cancel Order
-
-```http
-POST http://localhost:8080/api/orders/1/cancel
-```
-
-Response: `200 OK`. Stock returns to `20` keyboards and `10` mice; the financial snapshot is retained.
-
-```json
-{
-  "id": 1,
-  "status": "CANCELLED",
-  "totalAmount": 139.79,
-  "createdAt": "2026-11-12T05:00:00Z",
-  "items": [
-    {"id":1,"productId":1,"quantity":2,"unitPrice":59.90,"subtotal":119.80},
-    {"id":2,"productId":2,"quantity":1,"unitPrice":19.99,"subtotal":19.99}
-  ]
-}
-```
-
-Cancelling again returns `409 Conflict` with message `Order 1 is already cancelled`. Deleting either referenced product also returns `409`, including after cancellation. Since V4, even the separate unused product in requests.http has an INITIAL_STOCK entry, so deleting it returns `409` and reading it still returns `200`. Successful `204` deletion is limited to legacy products without order references or movement history.
-
-### Confirm, Ship, and Deliver
-
-Create a **separate** order for fulfillment; the order cancelled above cannot be confirmed. Replace `2` below with the ID returned by that new create request, then send the actions in order:
-
-```http
-POST http://localhost:8080/api/orders/2/confirm
-```
-
-This returns `200 OK` with the existing order response fields and `status: "CONFIRMED"`.
-
-```http
-POST http://localhost:8080/api/orders/2/ship
-```
-
-This returns `200 OK` with `status: "SHIPPED"`, meaning the order has been handed to the carrier.
-
-```http
-POST http://localhost:8080/api/orders/2/deliver
-```
-
-This returns `200 OK` with `status: "DELIVERED"`. None of these actions changes stock or monetary snapshots. Cancelling this delivered order returns `409` with message `Order 2 cannot transition from DELIVERED to CANCELLED`. Repeating delivery also returns `409`.
+Insufficient Stock Error: with 18 keyboards remaining, quantity=21 returns 409 with message `Insufficient stock for product 1: requested 21, available 18`; stock/order/receipt/journal changes roll back. Invalid token returns 401 with WWW-Authenticate: Bearer; valid CUSTOMER attempting restock returns 403. Every error retains the shared ApiError shape.
 
 ## Testing
 
-Run service unit tests and controller tests without a database, Docker, or `.env`:
+No database, Docker, .env, or production signing secret is required for unit/MVC tests:
 
 ```powershell
 .\mvnw.cmd test
 ```
 
-Package the application and run the same tests:
+With Docker running, compile/package and run all PostgreSQL integration tests:
 
 ```powershell
-.\mvnw.cmd clean verify
+.\mvnw.cmd clean verify -Pintegration
 ```
 
-With Docker running, include the PostgreSQL integration tests:
+Linux/macOS: `sh mvnw ...`. Surefire runs *Test; Failsafe runs *IT under the integration profile. Testcontainers creates isolated PostgreSQL databases. Test keys/passwords are generated at runtime; no production credentials are used. Unit mocks cannot prove SQL transactions, JWT signature verification, or ownership enforcement across real HTTP requests.
 
-```powershell
-.\mvnw.cmd verify -Pintegration
-```
+Local verification on **18 November 2026**: `clean verify -Pintegration` completed with **BUILD SUCCESS**, **430 tests passed**, zero failures/errors/skips across 19 classes:
 
-On Linux/macOS, replace `.\mvnw.cmd` with `sh mvnw`. Surefire runs `*Test`; Failsafe runs `*IT` under the `integration` profile. Testcontainers creates an isolated PostgreSQL database and cleans up its containers; it does not use the Compose database.
+| Group | Passed | Evidence |
+| --- | ---: | --- |
+| Unit | 164 | Mockito service/domain tests and real Nimbus encoder/decoder tests; no database |
+| MVC slice | 133 | MockMvc with security filters; business services/repositories mocked |
+| PostgreSQL integration | 133 | Testcontainers, real transactions/locks, and HTTP authentication/ownership tests |
 
-### Recorded verification
+XML reports are in target/surefire-reports and target/failsafe-reports (excluded from Git). A separate Docker smoke check built the API, bootstrapped an operator-supplied ADMIN, ran the authenticated CUSTOMER/ADMIN demo (stock 24, five movements), rendered 15 Swagger operations with Authorize in headless Chrome, and verified login plus an existing token after restart with bootstrap disabled/password removed. PostgreSQL-only Compose also ran without JWT settings. Smoke checks are not included in the JUnit count.
 
-The API documentation and developer-experience update was compiled and packaged successfully with `clean verify -Pintegration` on **2026-11-17**, using Java 21.0.6, Maven 3.9.11, Docker Engine 27.3.1, and PostgreSQL 17.11. The local Surefire/Failsafe XML reports record:
+Security tests cover DTO validation, BCrypt byte limits/salts, JWT claims/signature/algorithm, 401/403, forbidden registration role, owner spoofing, other-user access, ADMIN operations, method security, per-user idempotency, concurrent registration/creation, stale/deleted identities, and V5-to-V6 data preservation. Existing stock, lifecycle, rollback, price, pagination, and key-lock tests remain enabled with explicit test identities. Controlled concurrency tests observe actual PostgreSQL lock waits; they are not exhaustive stress tests.
 
-| Suite | Test boundary | Passed |
-| --- | --- | ---: |
-| `OrderServiceTest` | JUnit 5 + Mockito; mocked repositories | 33 |
-| `IdempotentOrderServiceTest` | JUnit 5 + Mockito; mocked order service and idempotency repository | 18 |
-| `OrderStatusTest` | JUnit 5; complete 25-pair transition matrix | 25 |
-| `ProductServiceTest` | JUnit 5 + Mockito; mocked repositories | 16 |
-| `StockMovementTest` | JUnit 5; movement snapshots, balance, and history query validation | 14 |
-| `ProductSearchQueryTest` | JUnit 5; query validation and sort contract | 23 |
-| `ApiControllerTest` | MockMvc controller slice; mocked services | 72 |
-| `InventoryControllerTest` | MockMvc controller slice; mocked product service | 24 |
-| `OrderIdempotencyControllerTest` | MockMvc slice; real coordinator, mocked order service/JDBC repository | 12 |
-| `OrderManagementIT` | Spring context + real PostgreSQL/Testcontainers | 40 |
-| `ProductSearchIT` | Real PostgreSQL/Testcontainers; HTTP search, generated SQL, and query plans | 17 |
-| `InventoryManagementIT` | Real PostgreSQL/Testcontainers; inventory/journal atomicity, migration, constraints, and locking | 19 |
-| `OrderIdempotencyIT` | Real PostgreSQL/Testcontainers; durable replay, unique-key waits, rollback/takeover, timeout, and migration | 14 |
-| `ApiDocumentationIT` | Random-port HTTP + PostgreSQL/Testcontainers; OpenAPI schemas/refs, Swagger resources, health exposure, and empty startup data | 12 |
-| **Total** | **0 failures, 0 errors, 0 skipped** | **339** |
-
-The total consists of **129 unit tests, 108 MVC slice tests, and 102 PostgreSQL integration tests**. Unit/controller tests cover business rules, invalid quantities, missing products, duplicates, repeated cancellation, HTTP status codes, and validation. The integration tests verify schema mapping, committed inventory changes, forced SQL failures and rollback during creation/cancellation, monetary round-trips, and concurrent inventory access. The overlap tests observe a blocked request in PostgreSQL before allowing the first transaction to commit. Mock-based tests alone do not prove database transaction behavior.
-
-Lifecycle coverage includes all 25 enum source/target pairs, valid fulfillment actions with unchanged stock/financial snapshots, every invalid action/state combination through real HTTP/service/database integration, and rollback/retry for each new action after a forced SQL failure. Concurrency tests observe duplicate confirm/ship/deliver requests waiting on the order row, both confirm-versus-cancel winner cases, and adjacent actions that succeed in valid serial order. A separate test schema is migrated to V2, populated with CREATED/CANCELLED orders, then upgraded to V3 to verify existing data is preserved and the expanded constraint is applied. These are controlled scenarios, not a proof that every possible interleaving is deadlock-free.
-
-Search tests cover case-insensitive name matching, combined/individual filters, exact inclusive decimal bounds, true/false/omitted stock filters, literal SQL metacharacters, default compatibility, every supported sort, deterministic ties, filtered totals, empty/out-of-range pages, and invalid inputs. `ProductSearchIT` verifies that generated JPA SQL contains filtering, ordering, database pagination, and a filtered count, and checks the new price index on a 20,000-row fixture.
-
-Inventory tests verify all four movement types, references/reasons/snapshots, chronological pagination with timestamp ties, PUT/delete protections, SQL constraints, and V3→V4 migration without backfill. Forced movement INSERT failures cover product creation, order creation, cancellation, and restock; forced stock UPDATE failures verify journal inserts roll back too. Multi-product tests fail the second movement after the first was inserted. Overlap tests observe product lock waits for restock versus restock/order/cancel and an integer-overflow race; stock and movement chains remain consistent. Existing overselling and duplicate-cancellation tests now also assert that only one corresponding movement is committed. Mock tests do not establish these database guarantees.
-
-Idempotency tests cover first creation, exact stored-response replay after cancellation/price changes, equivalent reordered payloads, conflicting payloads, case-sensitive keys, and optional-header compatibility. Concurrent workers observe PostgreSQL unique-key waits before commit, conflict, or rollback takeover. Forced receipt/stock UPDATE failures prove all transaction writes roll back; a deferred trigger rejects unfinished claims. A real five-second lock timeout verifies HTTP 409 and subsequent replay after the owner commits. The JDBC repository explicitly uses Spring's PostgreSQL SQLSTATE translator so `55P03` is classified as a lock conflict rather than an unclassified HTTP 500. V4-to-V5 migration preserves existing orders without fabricating keys. These controlled tests do not simulate every failure mode or prove exactly-once behavior across arbitrary infrastructure failures.
-
-Documentation tests fetch the actual generated OpenAPI definition, resolve every internal reference, and check all 13 operations, separate request/response item schemas, validation constraints, idempotency headers/statuses, and the shared error format. They also serve Swagger HTML/JavaScript over a real HTTP socket, verify status-only health and seven hidden management endpoints, and confirm that startup does not insert demo products.
-
-These are recorded local results; check GitHub Actions separately for CI results. The [CI workflow](.github/workflows/ci.yml) runs `verify -Pintegration` on push and pull requests, including OpenAPI/health integration tests, with a 20-minute job timeout. See [REVIEW.md](REVIEW.md) for the earlier review record from 2026-11-12 in Vietnamese. No throughput benchmark has been recorded.
-
-The Dockerfile was also built on 2026-11-17, passing its 237 unit/MVC tests. The optional Compose app profile was started in an isolated verification project with temporary credentials and ports; both services became healthy. The PowerShell demo completed against the containerized API and checked final keyboard stock 24 and five movements. OpenAPI JSON/YAML returned 200, and Chrome headless rendered all 13 Swagger operations. Setting API_DOCS_ENABLED=false returned 404 for both Swagger UI and the JSON spec while health remained available. The temporary verification stack, database volume, and credential file were removed after these checks. These manual smoke checks are separate from the 339 JUnit test invocations above.
-
-Build output: `target/order-management-api-1.0.0.jar`. Test reports: `target/surefire-reports/` and `target/failsafe-reports/`. Build output is excluded from version control.
+The [CI workflow](.github/workflows/ci.yml) runs verify -Pintegration on push/PR with a 20-minute timeout. Local results do not imply CI success; inspect GitHub Actions separately. No production throughput/coverage benchmark is claimed.
 
 ## Design Decisions
 
-- **Transaction boundaries live in services.** Order creation locks products, validates all stock, deducts inventory, and saves the order/items in one transaction. Cancellation locks the order, validates its state, restores inventory, and changes the status together. Runtime failures roll back these changes.
-- **Lifecycle rules live in the domain.** Only CREATED → CONFIRMED → SHIPPED → DELIVERED and CREATED → CANCELLED are supported. Each transition locks the order in a service transaction. Fulfillment actions preserve stock and financial snapshots; cancellation is the only transition that restores inventory.
-- **Pessimistic locks protect inventory.** Product locks are acquired in ascending ID order to reduce deadlock risk. Product updates and deletion also use a write lock. Cancellation locks the order first so concurrent requests cannot restore the same stock twice. Connections use a five-second PostgreSQL lock timeout; lock conflicts return `409`.
-- **Money uses exact decimal arithmetic.** `BigDecimal` calculations and `NUMERIC` columns avoid binary floating-point rounding. The request never supplies an order total or item price; the server reads current product prices and stores snapshots.
-- **DTOs define the API boundary.** Request validation and explicit response mapping keep persistence details out of HTTP responses. `open-in-view=false` keeps entity access inside service transactions.
-- **History survives catalog changes.** Referenced products cannot be deleted. Order items retain quantity, unit price, and subtotal after cancellation or later product price changes.
-- **Duplicate products are rejected.** Requests must contain distinct product IDs; duplicate lines receive `400`. Clients should combine quantities before sending the order.
-- **Schema changes are explicit.** Flyway migrations define tables, constraints, and indexes; Hibernate validates rather than silently changing the schema.
-- **Search executes in PostgreSQL.** `ProductSearchQuery` validates input, `ProductSpecifications` builds optional predicates, and `JpaSpecificationExecutor.findAll(specification, pageable)` applies filtering, sorting, and pagination in SQL. DTO mapping happens only for the returned page. Spring Data executes a filtered count query when needed; it may infer the total for a partial page.
-- **Inventory and its journal share the transaction.** Product creation, order creation, cancellation, and restock insert movements using the same datasource/transaction. A failure in either write rolls back the entire operation. Stock is locked first; cancellation retains order-then-ascending-product lock ordering.
-- **The journal has targeted indexes and constraints.** `(product_id, created_at DESC, id DESC)` supports product history in either chronological direction and product-scoped counts. Partial unique indexes allow one opening entry per product and one deduction/cancellation per order/product/type. The latter starts with reference_order_id and also supports that foreign key's lookup; an extra redundant order-only index is not added. CHECK constraints validate signs, order/reason requirements, and before + delta = after, using BIGINT arithmetic to avoid INTEGER overflow during validation. The application and product constraint also reject negative stock.
-- **Order creation can be deduplicated.** An optional PostgreSQL-backed key coordinates creation before inventory locks; the receipt and original response commit in the same transaction as order/stock/journal. Invalid/failed transactions do not consume the key. Retained keys have no automatic expiry.
-- **Scope remains explicit.** There is no authentication. Repeating a successful create-order without a key, with another key, or a restock request can apply it again. PUT permits metadata replacement only when the supplied stock matches current locked stock; it cannot silently overwrite inventory from a stale payload.
-
-### Search query plans and indexes
-
-Migration [V2](src/main/resources/db/migration/V2__index_products_price_id.sql) adds B-tree `idx_products_price_id` on `(price, id)`, supporting selective price ranges and ascending price/ID pagination. The existing primary-key index supports the default ID order. This does not imply that every filter combination or descending price order avoids a sort; PostgreSQL chooses its plan based on selectivity and statistics. See the [PostgreSQL B-tree documentation](https://www.postgresql.org/docs/17/indexes-types.html).
-
-A plain index on `name` or `lower(name)` cannot efficiently serve an arbitrary leading-wildcard search such as `%keyboard%`. No such index is added. A GIN trigram index on `lower(name)` using [`pg_trgm`](https://www.postgresql.org/docs/17/pgtrgm.html) is a possible future optimization if realistic catalog sizes and measured keyword traffic justify the extension and index cost; it is not implemented here.
-
-No separate stock index is added: stock predicates can match much of the catalog, and indexing `stock_quantity` (including a partial index depending on it) adds maintenance work to inventory updates. Measure selectivity before adding one. Count queries and deep offset pages still have costs that a small page size cannot eliminate.
-
-`ProductSearchIT` loads 20,000 generated products in an isolated container, runs `ANALYZE`, captures the actual JPA page SQL, and runs `EXPLAIN (ANALYZE, BUFFERS)` for that price query and representative count/keyword/stock queries. It writes the plans to `target/product-search-explain.txt` and checks that the selective price page uses the migrated index. This fixture verifies query behavior and index use; it is not a throughput or production performance benchmark. Reproduce it with:
-
-```powershell
-.\mvnw.cmd verify -Pintegration '-Dit.test=ProductSearchIT'
-```
+- **Password storage:** BCrypt cost 12 with a fresh salt; no reversible password encryption. Validate 72 UTF-8 bytes before hashing so long Unicode passwords cannot be silently truncated. Normalize emails, never passwords. Hashing/verification uses Spring's PasswordEncoder and DaoAuthenticationProvider. See [Spring password storage](https://docs.spring.io/spring-security/reference/features/authentication/password-storage.html).
+- **JWT:** HS256 is sufficient for one issuing/verifying monolith. A random environment-provided key is mandatory. Spring/Nimbus verifies signatures with the pinned algorithm, issuer/audience, required numeric subject/role/iat/exp, timestamps, and 30-second clock leeway. JWTs are signed, not encrypted; they contain no password/hash/email. Replacing the secret invalidates existing tokens. See [Spring Resource Server JWT](https://docs.spring.io/spring-security/reference/servlet/oauth2/resource-server/jwt.html).
+- **Identity freshness:** Each JWT request rechecks the database account and role. Deleted accounts or changed roles invalidate old tokens. No HTTP session, refresh token, logout endpoint, individual token denylist, password reset, or role-change API is implemented. Access tokens otherwise remain usable until expiry; production deployment would need HTTPS and an appropriate abuse/rate-limit policy.
+- **Authorization:** Request matchers and method security check roles; repository ownership predicates protect Order reads. A role alone is not ownership. ADMIN-only cancellation preserves existing lifecycle/stock rules. User IDs/roles cannot be assigned through registration/order request DTOs.
+- **CSRF/CORS:** CSRF is disabled because authentication uses explicit bearer headers with no cookie/basic/form session. This choice must be revisited if cookie authentication is introduced. No permissive cross-origin policy is added.
+- **Transactions/locking:** Order creation, cancellation, restock and movements retain their write transactions and pessimistic product locks. Products are locked in ascending ID order; lifecycle/cancel lock the order first. Idempotency claims precede product locks. Authorization does not replace database concurrency controls.
+- **Migration compatibility:** Keep legacy owners/receipts NULL and ADMIN-only/archived rather than guessing user ownership. New application-created orders always have an owner. Schema nullability is an explicit compatibility limitation, not a claim that raw SQL obeys authorization. Existing API URLs/body shapes remain, with additive response userId; protected endpoints intentionally require authentication now.
+- **Scope:** One application/database, constructor injection, DTO boundaries, explicit Flyway migrations, and targeted indexes. No extra infrastructure is needed for these portfolio features.

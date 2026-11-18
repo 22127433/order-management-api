@@ -18,5 +18,5 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
-      - name: Unit, HTTP, PostgreSQL, OpenAPI, and health tests
+      - name: Unit, security, HTTP, PostgreSQL, OpenAPI, and health tests
         run: sh mvnw -B -ntp verify -Pintegration

@@ -8,6 +8,7 @@ import org.springframework.data.jpa.repository.Query;
 import org.springframework.data.repository.query.Param;
 
 public interface OrderRepository extends JpaRepository<CustomerOrder, Long> {
+    Optional<CustomerOrder> findByIdAndUserId(Long id, Long userId);
     // Lock only the order row. Fetching a collection with an outer join and FOR UPDATE
     // is not supported by PostgreSQL; items are loaded inside the service transaction.
     @Lock(LockModeType.PESSIMISTIC_WRITE)

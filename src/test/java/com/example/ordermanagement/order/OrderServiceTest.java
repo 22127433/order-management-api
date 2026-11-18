@@ -1,5 +1,7 @@
 package com.example.ordermanagement.order;
 
+import com.example.ordermanagement.support.TestSecurity;
+
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
@@ -22,6 +24,9 @@ import java.math.BigDecimal;
 import java.util.List;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.BeforeEach;
+import com.example.ordermanagement.auth.UserRepository;
+import com.example.ordermanagement.security.CurrentUser;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.CsvSource;
@@ -38,7 +43,33 @@ class OrderServiceTest {
     @Mock private OrderRepository orderRepository;
     @Mock private ProductRepository productRepository;
     @Mock private StockMovementRepository stockMovementRepository;
+    @Mock private CurrentUser currentUser;
+    @Mock private UserRepository users;
     @InjectMocks private OrderService service;
+
+    @BeforeEach
+    void identityFixture() {
+        org.mockito.Mockito.lenient().when(currentUser.id()).thenReturn(1L);
+        org.mockito.Mockito.lenient().when(currentUser.isAdmin()).thenReturn(true);
+        org.mockito.Mockito.lenient().when(users.getReferenceById(1L)).thenReturn(TestSecurity.user(1L));
+    }
+
+    @Test
+    void customerReadUsesOwnershipQueryAndCannotFallBackToUnrestrictedLookup() {
+        when(currentUser.isAdmin()).thenReturn(false);
+        when(orderRepository.findByIdAndUserId(99L, 1L)).thenReturn(Optional.empty());
+        assertThatThrownBy(() -> service.getById(99L)).isInstanceOf(ResourceNotFoundException.class);
+        verify(orderRepository, never()).findById(any());
+    }
+
+    @Test
+    void customerCanReadItsOwnOrder() {
+        when(currentUser.isAdmin()).thenReturn(false);
+        CustomerOrder order = CustomerOrder.create(TestSecurity.user(1L));
+        ReflectionTestUtils.setField(order, "id", 99L);
+        when(orderRepository.findByIdAndUserId(99L, 1L)).thenReturn(Optional.of(order));
+        assertThat(service.getById(99L).userId()).isEqualTo(1L);
+    }
 
     @Test
     void createsMultipleItemsUsingExactMoneyAndOrderedLocks() {
@@ -132,7 +163,7 @@ class OrderServiceTest {
     void cancelsAndRestoresEveryProductOnceInOrder() {
         Product first = product(1L, "12.50", 8);
         Product second = product(2L, "2.00", 7);
-        CustomerOrder order = CustomerOrder.create();
+        CustomerOrder order = CustomerOrder.create(TestSecurity.user(1L));
         order.addItem(second, 3);
         order.addItem(first, 2);
         ReflectionTestUtils.setField(order, "id", 1L);
@@ -164,7 +195,7 @@ class OrderServiceTest {
 
     @Test
     void alreadyCancelledOrderDoesNotLockOrRestoreProducts() {
-        CustomerOrder order = CustomerOrder.create();
+        CustomerOrder order = CustomerOrder.create(TestSecurity.user(1L));
         order.cancel();
         when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(order));
 
@@ -176,7 +207,7 @@ class OrderServiceTest {
     void cancelRejectsStockOverflowBeforeRestoringAnyProduct() {
         Product first = product(1L, "1.00", 5);
         Product second = product(2L, "1.00", Integer.MAX_VALUE);
-        CustomerOrder order = CustomerOrder.create();
+        CustomerOrder order = CustomerOrder.create(TestSecurity.user(1L));
         order.addItem(first, 2);
         order.addItem(second, 1);
         when(orderRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(order));
@@ -246,7 +277,7 @@ class OrderServiceTest {
     @Test
     void orderRetainsPriceSnapshotAfterProductPriceChanges() {
         Product product = product(1L, "9.99", 10);
-        CustomerOrder order = CustomerOrder.create();
+        CustomerOrder order = CustomerOrder.create(TestSecurity.user(1L));
         order.addItem(product, 3);
         when(orderRepository.findById(1L)).thenReturn(Optional.of(order));
         product.update("Updated", null, new BigDecimal("100.00"), 7);
@@ -258,7 +289,7 @@ class OrderServiceTest {
     }
 
     private CustomerOrder persistedOrder(Product product, OrderStatus status) {
-        CustomerOrder order = CustomerOrder.create();
+        CustomerOrder order = CustomerOrder.create(TestSecurity.user(1L));
         order.addItem(product, 3);
         ReflectionTestUtils.setField(order, "id", 1L);
         ReflectionTestUtils.setField(order, "status", status);

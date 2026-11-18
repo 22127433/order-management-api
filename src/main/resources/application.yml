@@ -33,6 +33,7 @@ springdoc:
     operations-sorter: method
     tags-sorter: alpha
     validator-url: none
+    persist-authorization: false
   paths-to-match: /api/**
   override-with-generic-response: false
 management:
@@ -54,3 +55,13 @@ server:
   error:
     include-message: never
     include-stacktrace: never
+app:
+  jwt:
+    secret-base64: ${JWT_SECRET_BASE64}
+    issuer: order-management-api
+    audience: order-management-api
+    access-token-ttl: 15m
+  bootstrap-admin:
+    enabled: ${BOOTSTRAP_ADMIN_ENABLED:false}
+    email: ${BOOTSTRAP_ADMIN_EMAIL:}
+    password: ${BOOTSTRAP_ADMIN_PASSWORD:}

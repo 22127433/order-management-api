@@ -44,7 +44,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 @SpringBootTest
 @AutoConfigureMockMvc
 @Testcontainers
-class OrderIdempotencyIT {
+class OrderIdempotencyIT extends com.example.ordermanagement.support.AuthenticatedIntegrationTest {
     @Container
     static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine");
 
@@ -59,7 +59,6 @@ class OrderIdempotencyIT {
     @Autowired private OrderService orders;
     @Autowired private ProductService products;
     @Autowired private JdbcTemplate jdbc;
-    @Autowired private MockMvc mvc;
     @Autowired private ObjectMapper mapper;
     @Autowired private PlatformTransactionManager transactionManager;
 
@@ -176,7 +175,7 @@ class OrderIdempotencyIT {
         var request = request(productId, 2);
         CountDownLatch written = new CountDownLatch(1);
         CountDownLatch finish = new CountDownLatch(1);
-        try (var executor = Executors.newSingleThreadExecutor()) {
+        try (var executor = authenticatedExecutor(1)) {
             var owner = executor.submit(() -> new TransactionTemplate(transactionManager).execute(status -> {
                 var result = idempotent.create("busy", request);
                 written.countDown();
@@ -313,7 +312,7 @@ class OrderIdempotencyIT {
     private <T> ConcurrentResults<T> overlap(Supplier<T> first, Supplier<T> second, boolean rollbackFirst) throws Exception {
         CountDownLatch written = new CountDownLatch(1);
         CountDownLatch finish = new CountDownLatch(1);
-        try (var executor = Executors.newFixedThreadPool(2)) {
+        try (var executor = authenticatedExecutor(2)) {
             var one = executor.submit(() -> new TransactionTemplate(transactionManager).execute(status -> {
                 T result = first.get();
                 written.countDown();

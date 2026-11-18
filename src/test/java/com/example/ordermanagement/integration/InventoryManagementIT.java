@@ -51,7 +51,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 @SpringBootTest
 @AutoConfigureMockMvc
 @Testcontainers
-class InventoryManagementIT {
+class InventoryManagementIT extends com.example.ordermanagement.support.AuthenticatedIntegrationTest {
     @Container
     static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine");
 
@@ -65,7 +65,6 @@ class InventoryManagementIT {
     @Autowired private ProductService products;
     @Autowired private OrderService orders;
     @Autowired private JdbcTemplate jdbc;
-    @Autowired private MockMvc mvc;
     @Autowired private PlatformTransactionManager transactionManager;
 
     @BeforeEach
@@ -365,7 +364,7 @@ class InventoryManagementIT {
     private List<Boolean> overlap(Supplier<Boolean> first, Callable<Boolean> second) throws Exception {
         CountDownLatch written = new CountDownLatch(1);
         CountDownLatch commit = new CountDownLatch(1);
-        try (var executor = Executors.newFixedThreadPool(2)) {
+        try (var executor = authenticatedExecutor(2)) {
             var one = executor.submit(() -> new TransactionTemplate(transactionManager).execute(status -> {
                 boolean result = first.get();
                 written.countDown();

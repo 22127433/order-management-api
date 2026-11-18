@@ -2,9 +2,9 @@
 
 Tài liệu được cập nhật theo source ngày **17/11/2026**, bao gồm Product Search, Order Lifecycle và Inventory Movement History. Mỗi chủ đề đi từ khái niệm, ví dụ đơn giản, đến câu trả lời ngắn khi phỏng vấn. Các liên kết trỏ tới file thật; tên method giúp tìm đúng vị trí. Phân biệt kiến thức chung với tính năng đã triển khai.
 
-Project có CRUD/tìm kiếm/lọc/phân trang Product và vòng đời Order: CREATED → CONFIRMED → SHIPPED → DELIVERED hoặc CREATED → CANCELLED. Stock trừ khi tạo, chỉ hoàn khi hủy từ CREATED. POST tạo Order hỗ trợ Idempotency-Key lưu PostgreSQL; restock chưa có cơ chế này. Chưa có đăng nhập, phân quyền, thanh toán hay khách hàng. Căn cứ tính năng retry: [IdempotentOrderService][idemservice], [V5][idemschema]. CustomerOrder không phải entity Customer. Căn cứ: [ProductController][pc], [OrderController][oc], [OrderService][os], [OrderStatus][status], [pom.xml][pom].
+Project có CRUD/tìm kiếm/lọc/phân trang Product và vòng đời Order: CREATED → CONFIRMED → SHIPPED → DELIVERED hoặc CREATED → CANCELLED. Stock trừ khi tạo, chỉ hoàn khi hủy từ CREATED. POST tạo Order hỗ trợ Idempotency-Key lưu PostgreSQL; restock chưa có cơ chế này. Đã có đăng ký/đăng nhập JWT, CUSTOMER/ADMIN và ownership của Order qua AppUser; chưa có thanh toán hoặc hồ sơ khách hàng riêng. Căn cứ bảo mật: [AuthService][authservice], [SecurityConfig][securityconfig], [V6][securityschema]. Căn cứ tính năng retry: [IdempotentOrderService][idemservice], [V5][idemschema]. CustomerOrder không phải entity Customer. Căn cứ: [ProductController][pc], [OrderController][oc], [OrderService][os], [OrderStatus][status], [pom.xml][pom].
 
-Lần chạy local `clean verify -Pintegration` ngày **17/11/2026** ghi nhận **339 lượt test pass**, không failure/error/skip: 129 unit, 108 MVC slice và 102 PostgreSQL integration. Kết quả 67 test trong [REVIEW.md][review] là mốc lịch sử ngày 12/11; không dùng thay số liệu hiện tại. Không suy diễn số test thành coverage hay hiệu năng. Căn cứ: [OrderServiceTest][ost], [OrderStatusTest][statustest], [ProductServiceTest][pst], [ProductSearchQueryTest][searchquerytest], [ApiControllerTest][webtest], [OrderManagementIT][it], [ProductSearchIT][searchit], [README — Testing](README.md#testing).
+Clean build bảo mật ngày **18/11/2026** có **430 lượt pass**: 164 unit, 133 MVC slice, 133 PostgreSQL integration; không failure/error/skip, trên 19 class. Xem [README — Testing](README.md#testing) và XML Surefire/Failsafe local. Mốc 339 lượt ngày 17/11 và 67 lượt trong [REVIEW.md][review] là lịch sử, không dùng thay kết quả mới. Không suy diễn số test thành coverage hay hiệu năng.
 
 ## Mục lục
 
@@ -35,7 +35,7 @@ Lần chạy local `clean verify -Pintegration` ngày **17/11/2026** ghi nhận 
 
 **Nền tảng:** IoC là chuyển quyền điều phối việc tạo và nối các đối tượng cho framework. Container, thường tiếp cận qua `ApplicationContext`, quản lý các đối tượng gọi là bean. DI là cách container cấp những dependency mà một đối tượng cần. [Tài liệu IoC và bean](https://docs.spring.io/spring-framework/reference/6.2/core/beans/introduction.html).
 
-**Ví dụ:** Controller cần service; service cần repository. Thay vì controller tự tạo một chuỗi `new ...`, Spring cung cấp đúng đối tượng đã được cấu hình. Trong project, `OrderController` nhận `OrderService`, còn `OrderService` nhận ba repository, gồm StockMovementRepository để ghi journal cùng transaction. Repository implementation được Spring Data cung cấp qua proxy. Căn cứ: [OrderController — constructor][oc], [OrderService — constructor][os], [OrderRepository][or].
+**Ví dụ:** Controller cần service; service cần repository. Thay vì controller tự tạo một chuỗi `new ...`, Spring cung cấp đúng đối tượng đã được cấu hình. Trong project, `OrderController` nhận `OrderService`, còn `OrderService` nhận bốn repository (Order, Product, StockMovement, User) và CurrentUser; StockMovementRepository ghi journal cùng transaction, UserRepository/CurrentUser xác định owner. Repository implementation được Spring Data cung cấp qua proxy. Căn cứ: [OrderController — constructor][oc], [OrderService — constructor][os], [OrderRepository][or].
 
 **Điểm dễ nhầm:** `Product` có `@Entity` nhưng không vì vậy trở thành Spring Bean. Các instance sản phẩm do nghiệp vụ/JPA tạo và có thể được persistence context quản lý. Singleton bean của Spring cũng không đồng nghĩa mọi request dùng chung một transaction; service hiện tại không lưu dữ liệu riêng của request vào field. Căn cứ: [Product][product], [ProductService][ps], [OrderService][os].
 
@@ -340,13 +340,13 @@ Handler còn kế thừa ResponseEntityExceptionHandler và override xử lý l�
 
 **Trả lời ngắn:** “Em dùng RestControllerAdvice để contract lỗi nhất quán và controller gọn. Advice chỉ ánh xạ lỗi HTTP; transaction rollback thuộc Spring transaction interceptor. Response 500 dùng thông báo chung, còn chi tiết lỗi được log phía server.” [Advice][advice], [service][os].
 
-### 4.6. Authentication và Authorization — kiến thức, chưa triển khai
+### 4.6. Authentication và Authorization — đã triển khai
 
 **Nền tảng:** Authentication xác minh “bạn là ai”, chẳng hạn đăng nhập bằng tài khoản. Authorization quyết định “bạn được làm gì”, chẳng hạn chỉ chủ đơn được xem đơn hoặc admin được sửa catalog. JWT là một lựa chọn biểu diễn token, không đồng nghĩa với toàn bộ hai cơ chế này.
 
-**Ranh giới thực tế:** Project không có Spring Security starter, JWT filter, user, role hoặc ownership của order. Do đó không được nói endpoint đang yêu cầu đăng nhập hoặc đã chống truy cập đơn của người khác. Dữ liệu đầu vào hợp lệ không thay cho quyền truy cập. Căn cứ: [pom.xml][pom], [OrderController][oc], [CustomerOrder][order].
+**Trong source hiện tại:** Resource Server xác minh JWT bằng Nimbus và kiểm tra user/role còn khớp PostgreSQL. SecurityFilterChain kiểm tra quyền HTTP; @PreAuthorize bảo vệ service. CUSTOMER đọc qua findByIdAndUserId, ADMIN được xem mọi đơn. Client không tự chọn ADMIN hoặc owner. Căn cứ: [SecurityConfig][securityconfig], [JwtConfig][jwtconfig], [OrderService][os], [OrderRepository][or].
 
-**Trả lời ngắn:** “Authentication xác minh danh tính, authorization kiểm tra quyền. Project này chưa triển khai cả hai; em tập trung transaction và tồn kho. Nếu phát triển tiếp, em cần mô hình user cùng kiểm tra quyền đối với resource, không chỉ thêm một token.” [Dependencies hiện có][pom], [model đơn hiện có][order].
+**Trả lời ngắn:** “Authentication xác minh ai đang gọi bằng access token; authorization kiểm tra role và quyền trên resource. Em dùng BCrypt cho password, JWT qua thư viện Spring/Nimbus, và query theo cả order ID lẫn user ID để khách chỉ đọc đơn mình. Token hợp lệ không tự cho phép xem mọi đơn.” [AuthService][authservice], [SecurityConfig][securityconfig], [OrderService][os].
 
 <a id="phan-5"></a>
 
@@ -382,13 +382,13 @@ Một test thường có ba bước: **Arrange** tạo dữ liệu và stub depe
 | Controller slice test | Có phần MVC | Không | Bind/serialize, validation, status/header, advice; service bị mock: [ApiControllerTest][webtest] |
 | Integration test | Full context | PostgreSQL Testcontainers | Mapping/schema, SQL, transaction, locking, và HTTP pipeline qua MockMvc với backend thật: [OrderManagementIT][it] |
 
-MockMvc không gửi HTTP qua một socket như trình duyệt/curl; nó gọi hạ tầng MVC trong test. Nhóm IT dùng MockMvc kiểm tra tích hợp controller/service/repository/DB nhưng không kiểm tra port, reverse proxy hoặc mạng triển khai. Riêng [ApiDocumentationIT][apidocit] khởi động embedded server ở random port và dùng TestRestTemplate qua HTTP thật để kiểm tra Swagger/OpenAPI/health; vẫn không kiểm tra reverse proxy production. Các test không dùng H2 để suy ra hành vi khóa PostgreSQL. Căn cứ: [annotations và container trong OrderManagementIT][it].
+MockMvc không gửi HTTP qua một socket như trình duyệt/curl; nó gọi hạ tầng MVC trong test. Nhóm IT dùng MockMvc kiểm tra tích hợp controller/service/repository/DB nhưng không kiểm tra port, reverse proxy hoặc mạng triển khai. Riêng [AuthenticationAuthorizationIT][authit] và [ApiDocumentationIT][apidocit] khởi động embedded server ở random port và dùng TestRestTemplate qua HTTP thật để kiểm tra Swagger/OpenAPI/health; vẫn không kiểm tra reverse proxy production. Các test không dùng H2 để suy ra hành vi khóa PostgreSQL. Căn cứ: [annotations và container trong OrderManagementIT][it].
 
 **Trả lời ngắn:** “Unit test nhanh và cô lập bằng mock, integration test kiểm tra các thành phần thật phối hợp. MockMvc slice của em có service mock; MockMvc trong IT dùng toàn bộ backend và PostgreSQL thật. Chỉ nhóm IT mới hỗ trợ kết luận về transaction và row lock.” [MVC test][webtest], [IT][it].
 
 ### 5.4. Đọc toàn bộ `OrderServiceTest`
 
-Class dùng MockitoExtension, ba repository mock và service được InjectMocks. Có **13 test method / 33 lượt**: quantity chạy 5 case, fulfillment hợp lệ 3 case, transition sai 15 case. Assert kiểm tra object/mocks, không query DB và không chứng minh transaction thật. Căn cứ: [OrderServiceTest][ost].
+Class dùng MockitoExtension, bốn repository và CurrentUser mock, service được InjectMocks. Có **15 test method / 35 lượt**: quantity chạy 5 case, fulfillment hợp lệ 3 case, transition sai 15 case. Assert kiểm tra object/mocks, không query DB và không chứng minh transaction thật. Căn cứ: [OrderServiceTest][ost].
 
 | Method | Dữ liệu → hành động → kiểm tra |
 | --- | --- |
@@ -403,6 +403,8 @@ Class dùng MockitoExtension, ba repository mock và service được InjectMock
 | [cancelRejectsStockOverflowBeforeRestoringAnyProduct][ost] | Một product có stock=Integer.MAX_VALUE cần hoàn thêm 1. Assert conflict, mọi stock còn nguyên và order vẫn CREATED. Xác nhận kiểm tra overflow trước vòng restore. |
 | [missingOrderReturnsNotFoundForReadAndCancel][ost] | Cả query đọc thường và query khóa trả empty. Assert getById/cancel/confirm/ship/deliver đều ném ResourceNotFoundException. |
 | [orderRetainsPriceSnapshotAfterProductPriceChanges][ost] | Thêm 3 item giá 9.99 vào order rồi đổi giá Product thành 100.00. Read DTO vẫn có unitPrice 9.99 và total 29.97. Không phải test round-trip PostgreSQL. |
+
+Hai test ownership mới vẫn dùng mock: `customerReadUsesOwnershipQueryAndCannotFallBackToUnrestrictedLookup` kiểm tra findByIdAndUserId trả empty thì 404 và tuyệt đối không gọi findById; `customerCanReadItsOwnOrder` kiểm tra DTO owner đúng khi query khớp. Chúng không chứng minh SQL isolation; phần đó ở [AuthenticationAuthorizationIT][authit].
 
 Các test lifecycle mới trong cùng class:
 
@@ -516,7 +518,7 @@ Các scenario lifecycle bổ sung trong cùng class:
 
 **Chờ khóa thật:** Hai test overlap cũ kiểm tra overselling và cancel trùng; ba test lifecycle concurrency mới kiểm tra duplicate action, hai chiều confirm–cancel và adjacent actions. Tất cả dùng pg_stat_activity để xác nhận wait trước commit. Reversed-items chỉ là regression scenario; unit inOrder chỉ kiểm tra mock. Căn cứ: [OrderManagementIT][it], [OrderServiceTest][ost].
 
-**Không suy diễn:** 339 lượt gồm 129 unit, 108 MVC slice và 102 PostgreSQL IT; không phải tất cả đều chứng minh database. Không có kết luận mọi interleaving đều không deadlock, 100% coverage hay throughput production. Căn cứ: [OrderStatusTest][statustest], [OrderServiceTest][ost], [ProductServiceTest][pst], [ProductSearchQueryTest][searchquerytest], [ApiControllerTest][webtest], [OrderManagementIT][it], [ProductSearchIT][searchit], [pom.xml][pom].
+**Không suy diễn:** 430 lượt gồm 164 unit, 133 MVC slice và 133 PostgreSQL IT; không phải tất cả đều chứng minh database. Không có kết luận mọi interleaving đều không deadlock, 100% coverage hay throughput production. Căn cứ: [README Testing](README.md#testing), [OrderManagementIT][it], [AuthenticationAuthorizationIT][authit], [pom.xml][pom].
 
 **Trả lời ngắn:** “Em có unit test cho quyết định nghiệp vụ, nhưng em không dùng mock để kết luận transaction đúng. Hai SQL-failure test kiểm tra rollback với PostgreSQL, và hai overlap test quan sát request thực sự chờ row lock. Đây là bằng chứng cho các kịch bản được test, không phải benchmark hay lời bảo đảm mọi tình huống.” [Integration test][it].
 
@@ -569,7 +571,7 @@ InventoryManagementIT có 11 method/19 lượt, dùng PostgreSQL thật và khô
 | secondProductMovementFailureRollsBackEveryProductAndEarlierMovement | 2 case create/cancel đa product: movement thứ hai lỗi, stock hai product, order và movement đầu đều rollback. |
 | databaseRejectsUnbalancedWrongSignMissingReferenceAndDuplicateMovements | CHECK, unique và FK từ chối các row sai, gồm phép cộng vượt miền int nếu không cast BIGINT. |
 
-Căn cứ bảng: [InventoryManagementIT][inventoryit]. Overlap helper dùng TransactionTemplate chỉ để giữ giao dịch worker đầu; worker sau gọi Spring service thật. Test lỗi SQL độc lập mới kiểm tra commit/rollback tại public service boundary. Không biến 339 lượt test thành tuyên bố mọi interleaving an toàn hoặc có throughput production. [ProductService][ps], [OrderService][os], [pom.xml][pom].
+Căn cứ bảng: [InventoryManagementIT][inventoryit]. Overlap helper dùng TransactionTemplate chỉ để giữ giao dịch worker đầu; worker sau gọi Spring service thật. Test lỗi SQL độc lập mới kiểm tra commit/rollback tại public service boundary. Số test pass không chứng minh mọi interleaving an toàn hoặc throughput production. [ProductService][ps], [OrderService][os], [pom.xml][pom].
 
 <a id="phan-6"></a>
 
@@ -688,7 +690,7 @@ Thời lượng là mục tiêu luyện nói, phụ thuộc tốc độ của b�
 
 #### Q06. Tại sao không trả Entity trực tiếp?
 
-“Entity phục vụ mapping DB, còn DTO là contract HTTP. Nếu trả entity trực tiếp, API có thể phụ thuộc vào quan hệ JPA, proxy LAZY và các field persistence mà em không định công khai. Trong project, CreateOrderRequest chỉ nhận ID và quantity, không nhận giá hoặc tổng do client tính. OrderResponse được map bên trong transaction, chỉ trả các trường cần thiết và item DTO. Đây cũng là cách tránh serialize vòng quan hệ order–items. Tuy nhiên em không coi DTO là cơ chế phân quyền; project chưa có ownership hay authentication. DTO giúp kiểm soát cấu trúc dữ liệu, còn quyền truy cập phải được triển khai riêng khi có yêu cầu.” Căn cứ: [Request][oreq], [response mapper][oresp], [mapping item][item], [config][config], [dependencies][pom].
+“Entity phục vụ mapping DB, còn DTO là contract HTTP. Nếu trả entity trực tiếp, API có thể phụ thuộc vào quan hệ JPA, proxy LAZY và các field persistence mà em không định công khai. Trong project, CreateOrderRequest chỉ nhận ID và quantity, không nhận giá hoặc tổng do client tính. OrderResponse được map bên trong transaction, chỉ trả các trường cần thiết và item DTO. Đây cũng là cách tránh serialize vòng quan hệ order–items. Tuy nhiên em không coi DTO là cơ chế phân quyền; project kiểm tra quyền qua SecurityConfig/@PreAuthorize và ownership qua query service. DTO kiểm soát cấu trúc; authorization là lớp kiểm tra riêng. Căn cứ: [SecurityConfig][securityconfig], [OrderService][os].” Căn cứ: [Request][oreq], [response mapper][oresp], [mapping item][item], [config][config], [dependencies][pom].
 
 #### Q07. JPA, Hibernate và Spring Data JPA khác nhau thế nào?
 
@@ -760,11 +762,11 @@ Thời lượng là mục tiêu luyện nói, phụ thuộc tốc độ của b�
 
 #### Q24. Unit Test và Integration Test của em khác nhau thế nào?
 
-“Unit test cô lập rule và service; Mockito repository không mở transaction hoặc khóa DB. MVC slice mock service để kiểm tra HTTP/validation. PostgreSQL Testcontainers chạy Spring backend thật để kiểm tra SQL, commit/rollback và concurrency. Hiện có 339 lượt: 129 unit, 108 MVC slice và 102 IT. Các IT dùng MockMvc vẫn không đi qua socket; riêng ApiDocumentationIT dùng TestRestTemplate qua HTTP socket thật; số lượt test không phải coverage hay số request/giây.” Căn cứ: [OrderServiceTest][ost], [OrderStatusTest][statustest], [ProductServiceTest][pst], [ProductSearchQueryTest][searchquerytest], [ApiControllerTest][webtest], [OrderManagementIT][it], [ProductSearchIT][searchit].
+“Unit test cô lập rule và service; Mockito repository không mở transaction hoặc khóa DB. MVC slice mock service để kiểm tra HTTP/validation. PostgreSQL Testcontainers chạy Spring backend thật để kiểm tra SQL, commit/rollback và concurrency. Kết quả mới nhất xem [README Testing](README.md#testing); các nhóm được đếm riêng từ XML Surefire/Failsafe. Các IT dùng MockMvc vẫn không đi qua socket; riêng AuthenticationAuthorizationIT và ApiDocumentationIT dùng TestRestTemplate qua HTTP socket thật; số lượt test không phải coverage hay số request/giây.” Căn cứ: [OrderServiceTest][ost], [OrderStatusTest][statustest], [ProductServiceTest][pst], [ProductSearchQueryTest][searchquerytest], [ApiControllerTest][webtest], [OrderManagementIT][it], [ProductSearchIT][searchit].
 
 #### Q25. @Mock và @InjectMocks có tạo transaction cho test không?
 
-“Không. @Mock tạo dependency giả và @InjectMocks tạo object cần test rồi inject các mock phù hợp. Với OrderServiceTest, Mockito có thể dùng constructor nhận ba repository, nhưng đó không phải bean đi qua Spring transaction proxy. Vì vậy dù method service có @Transactional trong source, gọi nó từ unit test này không tự mở transaction PostgreSQL. @MockitoBean ở WebMvcTest lại là thay service trong Spring test context để cô lập web layer. Muốn kiểm tra transaction thật, em dùng SpringBootTest và inject service thật, đồng thời kết nối DB thật. Đây là lý do kiểm tra exception và field stock trong unit test không đủ để kết luận SQL rollback.” Căn cứ: [Mockito setup][ost], [MVC setup][webtest], [IT setup][it], [OrderService annotations][os].
+“Không. @Mock tạo dependency giả và @InjectMocks tạo object cần test rồi inject các mock phù hợp. Với OrderServiceTest, Mockito có thể dùng constructor nhận bốn repository và CurrentUser, nhưng đó không phải bean đi qua Spring transaction proxy. Vì vậy dù method service có @Transactional trong source, gọi nó từ unit test này không tự mở transaction PostgreSQL. @MockitoBean ở WebMvcTest lại là thay service trong Spring test context để cô lập web layer. Muốn kiểm tra transaction thật, em dùng SpringBootTest và inject service thật, đồng thời kết nối DB thật. Đây là lý do kiểm tra exception và field stock trong unit test không đủ để kết luận SQL rollback.” Căn cứ: [Mockito setup][ost], [MVC setup][webtest], [IT setup][it], [OrderService annotations][os].
 
 #### Q26. Test nào chứng minh rollback thực tế?
 
@@ -784,7 +786,7 @@ Thời lượng là mục tiêu luyện nói, phụ thuộc tốc độ của b�
 
 #### Q30. Authentication và Authorization là gì? Project đã có chưa?
 
-“Authentication là xác minh danh tính, ví dụ ai đã đăng nhập. Authorization là quyết định danh tính đó được làm gì, ví dụ được sửa catalog hay chỉ xem đơn của chính mình. Hai việc khác validation: request hợp lệ chưa có nghĩa người gọi có quyền. Project hiện chưa có Spring Security, JWT, user, role hoặc liên kết chủ sở hữu order, nên em không nói API đã bảo vệ theo tài khoản. Nếu phát triển tiếp theo yêu cầu, em cần thiết kế identity và kiểm tra quyền trên từng resource; chỉ thêm token không tự hoàn thiện phân quyền. Phạm vi hiện tại của em là transaction, tồn kho, contract API và test có bằng chứng.” Căn cứ: [pom.xml][pom], [OrderController][oc], [CustomerOrder][order], [validation DTO][oreq].
+“Authentication xác minh danh tính; authorization quyết định quyền thao tác. Project dùng đăng ký CUSTOMER, đăng nhập qua DaoAuthenticationProvider/BCrypt rồi phát JWT 15 phút bằng Nimbus. Resource Server kiểm tra chữ ký HS256, issuer, audience, expiry, subject và role; mỗi request còn kiểm tra user trong DB. CUSTOMER tạo và đọc đơn mình; ADMIN quản catalog/kho và lifecycle. Ownership lấy từ principal và query tại DB, không tin userId từ client. 401 dành cho chưa xác thực, 403 cho thiếu quyền role; đọc đơn người khác trả 404. Đây vẫn là monolith, không có refresh token hay quản lý user/role.” Căn cứ: [AuthService][authservice], [JwtConfig][jwtconfig], [SecurityConfig][securityconfig], [OrderService][os].
 
 ### 7.2. Mười câu hỏi đào sâu vào source code
 
@@ -826,16 +828,16 @@ OrderResponse dùng unitPrice/subtotal đã lưu trong OrderItem và totalAmount
 
 #### D10. Vì sao số lượt test lớn hơn số method Java?
 
-Một method parameterized chạy nhiều invocation. Ví dụ OrderStatusTest chỉ có một method nhưng kiểm tra 25 cặp trạng thái; OrderServiceTest có 13 method và 33 lượt do quantity/valid/invalid transition chạy nhiều dữ liệu. Báo cáo hiện có 339 lượt trên 14 class; đọc XML Surefire/Failsafe để biết kết quả chạy, không đếm method rồi suy ra tất cả pass. Căn cứ: [OrderStatusTest][statustest], [OrderServiceTest][ost], [README Testing](README.md#testing), [pom.xml][pom].
+Một method parameterized chạy nhiều invocation. Ví dụ OrderStatusTest chỉ có một method nhưng kiểm tra 25 cặp trạng thái; OrderServiceTest có 15 method và 35 lượt do quantity/valid/invalid transition chạy nhiều dữ liệu. Báo cáo hiện có 430 lượt trên 19 class; đọc XML Surefire/Failsafe để biết kết quả chạy, không đếm method rồi suy ra tất cả pass. Căn cứ: [OrderStatusTest][statustest], [OrderServiceTest][ost], [README Testing](README.md#testing), [pom.xml][pom].
 
 ### 7.3. Năm điểm có thể cải thiện — chưa triển khai
 
 Đây là các hướng trả lời khi được hỏi “nếu có thêm thời gian”, không phải tính năng đã có hay những thay đổi được thực hiện trong lần viết tài liệu này.
 
 1. **Kiểm soát stale metadata của Product PUT.** Guard stock đã ngăn thay tồn kho trực tiếp, nhưng tên/giá vẫn chưa có version/If-Match để phát hiện payload cũ. Có thể cân nhắc precondition khi có yêu cầu; thêm @Version mà không truyền ý định/version từ client không giải quyết mọi stale payload. Căn cứ: [ProductService.update][ps], [Product][product], [ProductRequest][preq].
-2. **Chính sách lưu key và phạm vi người dùng.** Tạo đơn đã có key bền vững, nhưng hiện key toàn endpoint và giữ vô hạn. Khi có authentication, cần namespace theo principal/tenant và xác định retention contract trước khi thêm cleanup; xóa key có thể cho phép tạo đơn lại. Không coi đây là exactly-once trong mọi điều kiện. Căn cứ hiện trạng: [IdempotentOrderService][idemservice], [repository][idemrepo], [V5][idemschema], [README](README.md#idempotent-order-creation).
-3. **Authentication/Authorization theo resource khi mở rộng phạm vi.** Cần mô hình danh tính/ownership và rule ai được sửa sản phẩm hoặc xem/hủy đơn. Không chỉ thêm JWT rồi coi là có quyền truy cập đúng. Đây là đề xuất tương lai vì project hiện không có Spring Security hay user. Căn cứ hiện trạng: [pom.xml][pom], [CustomerOrder][order], [OrderController][oc].
-4. **Bổ sung scenario tích hợp ở các biên còn thiếu.** Kiểm tra timeout 5 giây thật, cạnh tranh đặt hàng với update/delete và các lỗi constraint bằng SQL trực tiếp. Hiện test timeout chỉ mock exception, còn reversed-items là một lần chạy có kiểm soát chứ chưa stress test. Mục tiêu là bằng chứng có ý nghĩa, không chạy lặp vô hạn rồi tuyên bố không có race. Căn cứ hiện trạng: [ApiControllerTest.lockTimeoutReturns409][webtest], [OrderManagementIT][it], [lock_timeout config][config].
+2. **Chính sách lưu key.** V6 đã scope key theo user; receipt vẫn giữ vô hạn. Cần xác định retention contract trước cleanup vì xóa receipt có thể cho phép tạo lại đơn. Không nhận exactly-once trong mọi điều kiện. Căn cứ: [IdempotentOrderService][idemservice], [V6][securityschema].
+3. **Vòng đời credential và chống lạm dụng.** Authentication/ownership đã có; chưa có refresh/logout/revocation từng token, đổi mật khẩu, reset password, khóa tài khoản hoặc rate limiting. Nếu thêm, cần thiết kế riêng và test, không nhận là chức năng hiện tại. Căn cứ phạm vi: [AuthController][authcontroller], [SecurityConfig][securityconfig], [README](README.md#design-decisions).
+4. **Bổ sung scenario tích hợp ở các biên còn thiếu.** Cạnh tranh đặt hàng với update/delete, timeout riêng của product row lock và nhiều interleaving hơn. OrderIdempotencyIT đã kiểm tra unique-key lock timeout PostgreSQL thật; ApiControllerTest chỉ mock lock exception. Reversed-items là kịch bản có kiểm soát, không phải stress test. Căn cứ: [OrderIdempotencyIT.inProgressKeyTimesOutWith409ThenCanReplayAfterOwnerCommits][idemit], [ApiControllerTest.lockTimeoutReturns409][webtest], [OrderManagementIT][it], [config][config].
 5. **Quan sát vận hành và timeout.** Compose đã kiểm tra HTTP health của API qua Actuator; response chỉ có status, không công khai chi tiết môi trường/database. Vẫn có thể bổ sung correlation ID và đo latency/lock contention trước khi tối ưu; chưa có benchmark hoặc endpoint metrics được expose. Căn cứ health/config: [application.yml][config], [ApiDocumentationIT][apidocit]. Không được nhận đã có số liệu p95 hoặc SLA. Căn cứ hiện trạng: [compose.yaml][compose], [Dockerfile][docker], [pom.xml][pom].
 
 ### 7.4. Giới thiệu project trong khoảng 60 giây
@@ -844,7 +846,7 @@ Một method parameterized chạy nhiều invocation. Ví dụ OrderStatusTest c
 
 Điểm em tập trung là tính nhất quán tồn kho. Khi tạo đơn, service lấy pessimistic write lock trên product theo ID tăng dần, kiểm tra toàn bộ stock rồi mới trừ kho và lưu đơn trong một transaction. Khi hủy, em khóa order để tránh hoàn kho hai lần. Tiền được tính bằng BigDecimal và giá lúc đặt hàng được giữ trong item.
 
-Về kiểm thử, em có unit test Mockito và integration test PostgreSQL/Testcontainers. Lần chạy local mới ghi nhận 339 lượt pass, gồm SQL rollback, chờ row lock và hai chiều confirm–cancel. Project hiện chưa có đăng nhập, thanh toán hoặc số liệu hiệu năng production; em có thể trình bày rõ giới hạn đó.”
+Về kiểm thử, em có unit test Mockito và integration test PostgreSQL/Testcontainers. Lần chạy local mới ghi nhận 430 lượt pass, gồm SQL rollback, chờ row lock và hai chiều confirm–cancel. Project có BCrypt, JWT và ownership theo CUSTOMER/ADMIN; chưa có thanh toán, refresh token hoặc số liệu hiệu năng production; em có thể trình bày rõ giới hạn đó.”
 
 Căn cứ cho nội dung giới thiệu: [controllers][pc], [OrderController][oc], [OrderService][os], [OrderItem][item], [test PostgreSQL][it], [dependencies][pom], [review][review]. Thời gian cần luyện đọc thực tế, không coi số giây là kết quả đã đo.
 
@@ -862,9 +864,9 @@ Khi hủy đơn, em khóa order trước để hai request không cùng thấy C
 
 Lifecycle còn có CREATED → CONFIRMED → SHIPPED → DELIVERED. Mỗi action khóa order trước khi kiểm tra, không trừ stock thêm. Confirm và cancel cạnh tranh thì chỉ nhánh hợp lệ theo trạng thái đã commit được tiếp tục; hai action liền nhau có thể cùng thành công nếu đúng thứ tự. Căn cứ: [OrderStatus][status], [OrderService][os], [test lifecycle concurrency][it].
 
-Về test, Mockito giúp em kiểm tra rule nghiệp vụ nhanh nhưng không chứng minh transaction. Em dùng PostgreSQL Testcontainers để gây lỗi stock UPDATE sau khi đã INSERT đơn và kiểm tra DB rollback. Với concurrency, test giữ transaction đầu, nhìn pg_stat_activity để xác nhận request thứ hai thật sự chờ lock, rồi mới cho commit. Lần chạy local hiện có 339 lượt test pass; em không coi đó là coverage hay benchmark. Căn cứ: [unit tests][ost], [integration tests][it], [review][review].
+Về test, Mockito giúp em kiểm tra rule nghiệp vụ nhanh nhưng không chứng minh transaction. Em dùng PostgreSQL Testcontainers để gây lỗi stock UPDATE sau khi đã INSERT đơn và kiểm tra DB rollback. Với concurrency, test giữ transaction đầu, nhìn pg_stat_activity để xác nhận request thứ hai thật sự chờ lock, rồi mới cho commit. Lần chạy local hiện có 430 lượt test pass; em không coi đó là coverage hay benchmark. Căn cứ: [unit tests][ost], [integration tests][it], [review][review].
 
-Project chưa có authentication, authorization hoặc payment. Tạo đơn đã có key bền vững trong PostgreSQL, unique constraint phân xử request đồng thời và rollback không giữ key lỗi; restock chưa hỗ trợ key. Em sẽ ưu tiên quyền truy cập resource và chính sách giữ key khi phát triển tiếp. Căn cứ: [IdempotentOrderService][idemservice], [V5][idemschema]. Em sẵn sàng mở source để trace từng bước và nói rõ điều nào được unit test kiểm tra, điều nào đã có bằng chứng database thật.” Căn cứ hiện trạng: [pom.xml][pom], [ProductService.update][ps], [OrderController][oc], [schema][schema].
+Project có authentication JWT, authorization CUSTOMER/ADMIN và ownership tại DB; chưa có payment, refresh token, logout/revocation từng token hoặc rate limiting. Idempotency scope theo user và giữ receipt vô hạn; restock chưa nhận key. Em ưu tiên retention, vòng đời credential và chống lạm dụng khi mở rộng. Em có thể trace code và phân biệt unit mock với kiểm chứng HTTP/PostgreSQL thật. Căn cứ: [AuthService][authservice], [SecurityConfig][securityconfig], [OrderService][os], [V6][securityschema].
 
 <a id="phan-8"></a>
 
@@ -1014,18 +1016,18 @@ GET /api/products/{id}/stock-movements kiểm tra ID, page/size/sort, service ki
 | Bước | File/class/method | Hành vi |
 | --- | --- | --- |
 | 1 | [OrderController.create][oc] | @Valid kiểm tra body. Không có header thì dùng OrderService như trước. Có header thì gọi IdempotentOrderService qua proxy. |
-| 2 | [IdempotentOrderService.create][idemservice] | Mở transaction READ_COMMITTED; kiểm tra key 1–128 ký tự ASCII cho phép, không trim hoặc đổi hoa thường. |
+| 2 | [IdempotentOrderService.create][idemservice] | Mở transaction READ_COMMITTED; CurrentUser xác định scope user_id; kiểm tra key 1–128 ký tự ASCII cho phép, không trim hoặc đổi hoa thường. |
 | 3 | [OrderRequestNormalizer.canonicalPayload/quantities][idemnormalizer] | Kiểm tra item/quantity/duplicate, TreeMap sắp ID; tạo chuỗi v1|1:2;9:3;. Lưu toàn chuỗi thay vì hash nên không có vấn đề collision của hash. Đổi thứ tự item vẫn cùng payload. |
-| 4 | [OrderIdempotencyRepository.claim][idemrepo] | INSERT ... ON CONFLICT DO NOTHING trên PK; xảy ra trước mọi product lock. Unique index của PostgreSQL chờ transaction đang dùng cùng key. |
+| 4 | [OrderIdempotencyRepository.claim][idemrepo] | INSERT ... ON CONFLICT DO NOTHING trên unique partial index (user_id, idempotency_key) từ V6; xảy ra trước mọi product lock. Unique index của PostgreSQL chờ transaction đang dùng cùng user/key. |
 | 5a | [IdempotentOrderService.create][idemservice], [OrderService.create][os] | Claim thành công: gọi bean OrderService qua proxy; REQUIRED tham gia cùng transaction. Khóa Product theo ID, tính tiền, ghi Order/items/journal như trước. |
 | 6a | [OrderIdempotencyRepository.complete][idemrepo] | Ghi order_id và JSON snapshot của OrderResponse. JdbcTemplate và Hibernate dùng cùng datasource connection/transaction; lỗi ở bất kỳ write/flush/commit nào rollback cả key lẫn nghiệp vụ. |
-| 7a | [Migration V5][idemschema] | Deferred constraint trigger kiểm tra trạng thái row cuối transaction; không cho commit claim thiếu order/response. Proxy commit xong controller mới trả 201, Location, Idempotency-Replayed=false. |
+| 7a | [Migration V5][idemschema], [V6][securityschema] | Deferred constraint trigger kiểm tra trạng thái row cuối transaction; không cho commit claim thiếu order/response. Proxy commit xong controller mới trả 201, Location, Idempotency-Replayed=false. |
 | 5b | [OrderIdempotencyRepository.findCompleted][idemrepo] | Claim không insert vì key đã commit: chạy SELECT ở statement mới, lấy snapshot READ COMMITTED mới. Không dùng snapshot cũ của INSERT, không catch unique exception rồi query trong transaction đã abort. |
 | 6b | [IdempotentOrderService.create][idemservice], [OrderController][oc] | Payload khác hợp lệ → 409; giống → deserialize snapshot, trả 200/Location/Idempotency-Replayed=true. Không gọi OrderService nên không đổi stock hoặc trạng thái. |
 
 Nếu transaction trước rollback, request đang chờ có thể INSERT thành công rồi tự tạo Order. Nếu trước commit nhưng response bị mất trên mạng, retry đọc receipt đã commit. Nếu Order bị hủy sau đó, retry vẫn trả snapshot CREATED gốc, không hồi sinh Order; GET Order mới phản ánh CANCELLED. Căn cứ: [repository][idemrepo], [service][idemservice], [OrderIdempotencyIT][idemit].
 
-**Key đang xử lý hoặc thất bại:** Không commit trạng thái PROCESSING, không lưu lỗi để cache. Claim thất bại rollback; key có thể dùng lại. Wait lock quá 5 giây trả 409 để retry theo cấu hình hiện tại. Disconnect/crash rollback giải phóng claim chưa commit. Một session vẫn sống nhưng treo cần timeout database/biện pháp vận hành; không có lease tự cướp giao dịch đang sống. Key đã commit giữ vô hạn, chưa có cleanup hoặc namespace theo user vì chưa có authentication. Không hứa exactly-once cho mọi tình huống. Căn cứ: [application.yml][config], [V5][idemschema], [README](README.md#idempotent-order-creation).
+**Key đang xử lý hoặc thất bại:** Không commit trạng thái PROCESSING, không lưu lỗi để cache. Claim thất bại rollback; key có thể dùng lại. Wait lock quá 5 giây trả 409 để retry theo cấu hình hiện tại. Disconnect/crash rollback giải phóng claim chưa commit. Một session vẫn sống nhưng treo cần timeout database/biện pháp vận hành; không có lease tự cướp giao dịch đang sống. Key đã commit giữ vô hạn, chưa có cleanup; từ V6 namespace là user_id lấy từ principal, không phải payload. Căn cứ: [V6][securityschema], [CurrentUser][currentuser]. Không hứa exactly-once cho mọi tình huống. Căn cứ: [application.yml][config], [V5][idemschema], [README](README.md#idempotent-order-creation).
 
 **Trả lời phỏng vấn ngắn:** “Em dùng unique key trong PostgreSQL, claim bằng ON CONFLICT trước khi khóa Product. Request thắng tạo đơn trong cùng transaction với stock, journal và response snapshot. Request trùng chờ DB rồi đọc kết quả đã commit bằng SELECT mới, không trừ kho thêm. Nếu giao dịch đầu rollback, request chờ có thể tiếp quản. Lần đầu trả 201, retry cùng nội dung trả 200, khác nội dung trả 409. Key không thay thế authentication và chỉ deduplicate khi receipt còn được giữ.” Căn cứ: [IdempotentOrderService][idemservice], [repository][idemrepo], [integration test][idemit].
 
@@ -1089,20 +1091,118 @@ Overlap helper dùng TransactionTemplate bên ngoài chỉ để trì hoãn comm
 
 Swagger UI ở /swagger-ui/index.html dùng /v3/api-docs; có thể tắt cả hai bằng API_DOCS_ENABLED=false. Chỉ expose Actuator health, hide details/components, không expose env/configprops/metrics/beans hoặc JMX endpoint. Health UP chỉ là trạng thái kỹ thuật, không chứng minh stock logic đúng. Compose app profile đã có API healthcheck; default vẫn chỉ chạy PostgreSQL. Căn cứ: [config][config], [compose][compose].
 
-[scripts/demo.ps1][demoscript] chỉ chạy khi người dùng gọi, chỉ chấp nhận URL loopback và tạo dữ liệu qua HTTP API. Mỗi lần thêm hai Product/hai Order, minh họa retry/cancel/lifecycle/restock, kiểm tra stock cuối 24 và 5 movement cho keyboard. Không có startup seed hoặc backfill production. Script in ID thực tế để dùng trong Swagger; sample ID trong schema không phải dữ liệu đã tồn tại.
+[scripts/demo.ps1][demoscript] chỉ chạy khi người dùng gọi, chỉ chấp nhận URL loopback và tạo dữ liệu qua HTTP API. Script prompt credential ADMIN, đăng ký CUSTOMER mới; mỗi lần thêm một CUSTOMER, hai Product/hai Order, minh họa retry/cancel/lifecycle/restock, kiểm tra stock cuối 24 và 5 movement cho keyboard. Không có startup seed hoặc backfill production. Script in ID thực tế để dùng trong Swagger; sample ID trong schema không phải dữ liệu đã tồn tại.
 
 [ApiDocumentationIT][apidocit] dùng PostgreSQL Testcontainers và TestRestTemplate qua server random port, không mock service/repository:
 
 | Method | Điều được kiểm tra |
 | --- | --- |
-| specificationDocumentsAllBusinessOperationsAndResolvesEveryLocalReference | Có đủ 13 operation/10 path, summary/tag/error, và mọi $ref nội bộ resolve được. |
+| specificationDocumentsAllBusinessOperationsAndResolvesEveryLocalReference | Có đủ 15 operation/12 path, summary/tag/error, và mọi $ref nội bộ resolve được. |
 | creationDocumentsOptionalKeyReplayHeadersAndDistinctRequestResponseItems | Key tùy chọn/giới hạn 128 ký tự, 200/201/409 và headers; schema item request/response không trùng. |
 | documentationIncludesValidationPaginationLifecycleAndSharedErrorSchemas | Giá/name/item/reason/page size, query parameters, lifecycle conflict, ApiError và DELETE 204 không có body. |
 | swaggerUiHtmlAssetsAndConfigurationAreServedOverHttp | HTML, bundle JavaScript và swagger-config được serve qua HTTP; UI trỏ spec của project. |
 | healthExposesOnlyStatusAndApplicationDoesNotSeedDemoData | Health chỉ có status UP; DB mới không tự có demo Product. |
-| otherActuatorEndpointsAreNotExposed | env/configprops/beans/metrics/info/heapdump/loggers trả 404. |
+| otherActuatorEndpointsAreNotExposed | env/configprops/beans/metrics/info/heapdump/loggers không expose; anonymous nhận 401 bởi security trước khi routing. |
 
-Đây là kiểm tra HTTP/spec/resource thực; bản thân JUnit class không kiểm thử browser render hoặc benchmark. Ngoài JUnit, smoke check ngày 17/11/2026 đã build/chạy Compose API + PostgreSQL, chạy demo PowerShell và dùng Chrome headless xác nhận UI render 13 operation; thử tắt docs vẫn giữ health. Các smoke check này không được cộng vào 339 lượt JUnit. Unit/MVC nghiệp vụ cũ vẫn kiểm tra rule riêng. Căn cứ: [ApiDocumentationIT][apidocit], [README Testing](README.md#testing).
+JUnit kiểm tra HTTP/spec/resource, không render browser. Smoke check ngày 18/11/2026 chạy Compose API/PostgreSQL, bootstrap ADMIN do operator cấp, demo CUSTOMER/ADMIN và Chrome headless render 15 operation cùng Authorize. Sau khi bỏ bootstrap password và recreate API, admin login và token trước restart vẫn hoạt động. Các smoke check không được cộng vào JUnit; không phải benchmark. Căn cứ quy trình: [demo script][demoscript], [Compose][compose], [README Testing](README.md#testing).
+
+### 8.10. Spring Security, BCrypt, JWT và ownership
+
+**Từ nền tảng:** Đăng nhập giống xuất trình giấy tờ để nhận thẻ ra vào ngắn hạn. BCrypt lưu dấu kiểm tra một chiều có salt, không lưu password gốc và không giải mã để đăng nhập. JWT là thẻ có chữ ký, không phải dữ liệu mã hóa: ai giữ token đều có thể sử dụng cho đến khi hết hạn. Thư viện Spring/Nimbus ký và xác minh; code không tự viết thuật toán. Căn cứ: [JwtConfig][jwtconfig], [TokenService][tokenservice], [AuthService][authservice].
+
+**Lựa chọn cho monolith:** Boot 3.5.16 quản lý Security 6.5.11; starter Resource Server kéo JOSE/Nimbus tương thích. HS256 dùng một secret tối thiểu 32 byte random trong môi trường, không có default. Issuer/audience cố định, sub là ID dương, role enum, iat/exp bắt buộc; TTL mặc định 15 phút (config cho phép 1 phút–1 giờ), clock skew 30 giây. JWT không chứa password, hash hay email. Mỗi bearer request kiểm tra user tồn tại và role khớp DB: stateless nghĩa là không có HTTP session, không có nghĩa không query DB. Căn cứ: [pom.xml][pom], [JwtProperties][jwtproperties], [JwtConfig][jwtconfig], [SecurityConfig][securityconfig].
+
+**Trace đăng ký:** POST /api/auth/register → AuthController nhận RegisterRequest @Valid → AuthService kiểm tra lại validation/UTF-8 byte → kiểm tra email → PasswordEncoder.encode → AppUser.customer → saveAndFlush trong transaction → UserResponse 201, không password/hash. Email strip/lowercase; password giữ nguyên khoảng trắng, 12–72 ký tự và <=72 byte UTF-8. Unique email ở DB chặn race, advice trả 409. Body không có role; Jackson chặn field ADMIN lạ. Căn cứ: [RegisterRequest][registerrequest], [AuthController][authcontroller], [AuthService][authservice], [AppUser][appuser], [V6][securityschema], [advice][advice].
+
+**Trace đăng nhập:** LoginRequest → AuthService.login read-only transaction → AuthenticationManager/DaoAuthenticationProvider → UserDetailsService đọc email đã normalize → BCrypt matches → TokenService.issue → 200 Bearer token, expiresIn=900, user DTO, Cache-Control:no-store. Email không tồn tại/sai password cùng thông báo 401; lỗi hạ tầng authentication trả 500 chung. Không cookie/session, không refresh/logout. Căn cứ: [LoginRequest][loginrequest], [AuthService][authservice], [JwtConfig][jwtconfig], [TokenService][tokenservice], [SecurityErrorHandler][securityerrors], [advice][advice].
+
+**Trace request bảo vệ:** BearerTokenAuthenticationFilter của framework → JwtDecoder kiểm tra chữ ký/algorithm/claims → converter kiểm tra user/role DB → SecurityContext → route role → controller → proxy @PreAuthorize → service. GET order dùng findByIdAndUserId cho CUSTOMER, không fetch mọi order rồi lọc. Owner khi create lấy từ CurrentUser, không request. ADMIN được đọc mọi order và thực hiện confirm/ship/deliver/cancel/restock; CUSTOMER chỉ tạo/đọc đơn mình. Catalog GET public. Căn cứ: [SecurityConfig][securityconfig], [CurrentUser][currentuser], [OrderService][os], [OrderRepository][or], [ProductService][ps].
+
+**401/403/404:** Không có token, token sai/hết hạn hoặc user/role không còn hợp lệ →401 có WWW-Authenticate Bearer. Đã xác thực nhưng thiếu role →403. CUSTOMER hỏi đơn người khác hoặc legacy owner null →404 như đơn không tồn tại. Security error handler dùng cùng ApiError vì lỗi filter xảy ra trước MVC advice. Database authentication outage →500 chung, không tiết lộ nội dung SQL/token. Căn cứ: [SecurityErrorHandler][securityerrors], [advice][advice], [SecurityConfig][securityconfig], [OrderService][os].
+
+**Dữ liệu cũ và concurrency:** V6 chỉ thêm schema, không sửa migration cũ, không invent user/owner. Owner nullable cho legacy; order mới luôn gắn principal. Receipt cũ user null giữ nguyên, không cho CUSTOMER nhận lại. Key mới unique theo (user_id,key); claim trước khóa product, các thứ tự khóa/state/stock/journal trước đây vẫn giữ. Không khóa user row mỗi request. Căn cứ: [V6][securityschema], [OrderIdempotencyRepository][idemrepo], [IdempotentOrderService][idemservice], [OrderService][os].
+
+**Khởi tạo ADMIN:** Mặc định không tạo tài khoản. Operator tự bật bootstrap và cấp email/password môi trường; component dùng BCrypt trong transaction, từ chối promote CUSTOMER, không reset ADMIN sẵn có. Sau lần đầu tắt flag/xóa bootstrap password. init-local chỉ sinh signing secret local chưa có, không xoay key ngầm hoặc in secret. Căn cứ: [AdminBootstrap][adminbootstrap], [init-local.ps1][initlocal], [.env.example][env].
+
+**CSRF và giới hạn:** CSRF disable vì API chỉ nhận Authorization Bearer do caller thêm rõ ràng, không dựa cookie tự gửi; nếu thêm cookie auth cần đánh giá lại. Không bật CORS permissive. Public docs/catalog vẫn có thể trả 401 nếu caller cố gửi token sai. Chưa có rate limiting, refresh/logout, revoke từng token, rotate key nhiều khóa, đổi/reset password hoặc role administration. Không dùng HTTP local làm khuyến nghị production; deployment thật cần HTTPS và quản lý secret phù hợp. Căn cứ hiện trạng: [SecurityConfig][securityconfig], [AuthController][authcontroller], [config][config].
+
+**Câu trả lời 30–60 giây:** “Em giữ ứng dụng monolith và dùng Resource Server chuẩn của Spring thay vì tự viết JWT filter. Password dùng BCrypt cost 12, key random từ môi trường, token 15 phút có kiểm tra issuer/audience/expiry. CUSTOMER được tạo và xem đơn mình; ADMIN quản catalog, kho và trạng thái. Owner lấy từ principal và lọc tại database, nên token hợp lệ không đủ xem đơn người khác. V6 giữ order cũ owner null cho admin xử lý và scope idempotency theo user. Test HTTP thật với PostgreSQL kiểm tra cả role lẫn ownership; mock không chứng minh được điều đó.” [JwtConfig][jwtconfig], [SecurityConfig][securityconfig], [V6][securityschema], [AuthenticationAuthorizationIT][authit].
+
+#### Đọc từng security test
+
+Unit test không mở transaction PostgreSQL. JwtConfigTest dùng Nimbus thật nhưng không có HTTP/DB. MVC slice dùng security filter thật với service/repository/decoder mock. AuthenticationAuthorizationIT gọi HTTP socket thật, Spring bean thật và PostgreSQL Testcontainers. Bốn business IT cũ dùng AuthenticatedIntegrationTest thiết lập identity test rõ ràng và truyền SecurityContext cho worker; chúng không thay thế kiểm tra chữ ký JWT qua HTTP. Căn cứ: [AuthServiceTest][authunit], [JwtConfigTest][jwttest], [SecurityControllerTest][securityweb], [AuthenticationAuthorizationIT][authit], [AuthenticatedIntegrationTest][authenticatedbase], [JwtTestProperties][jwtfixture], [TestSecurity][testsecurity].
+
+**[AuthServiceTest][authunit]**
+
+| Method | Điều kiểm tra / giới hạn bằng chứng |
+| --- | --- |
+| `registrationNormalizesEmailAssignsCustomerAndDelegatesHashing` | Email normalize, luôn CUSTOMER; encoder mock được gọi, entity giữ hash và response an toàn. |
+| `duplicateEmailDoesNotHashOrCreateAccount` | Email có sẵn gây conflict trước encoder hoặc save. |
+| `rejectsInvalidRegistrationPasswordBeforePersistence` | 4 password rỗng/ngắn/trắng không đến repository. |
+| `rejectsUtf8PasswordOver72BytesDespiteValidCharacterLength` | Unicode chưa quá giới hạn ký tự nhưng quá 72 byte bị chặn trước hash. |
+| `preservesPasswordWhitespaceInsteadOfSilentlyNormalizingIt` | Encoder nhận nguyên password có khoảng trắng. |
+| `successfulLoginUsesAuthenticationManagerAndIssuesTokenForAuthenticatedId` | Manager nhận email chuẩn hóa; token phát cho ID xác thực, không email nhập từ client. |
+| `failedLoginDoesNotIssueToken` | Manager ném BadCredentials, không tìm user hoặc phát token. |
+| `credentialsAndTokenDtoToStringDoNotLeakSecrets` | toString request/token không đưa credential/token vào log. |
+
+**[AdminBootstrapTest][bootstraptest]**
+
+| Method | Điều kiểm tra / giới hạn bằng chứng |
+| --- | --- |
+| `explicitBootstrapCreatesAdminWithEncodedPassword` | Bootstrap được gọi chủ động tạo ADMIN và delegate BCrypt encoding. |
+| `refusesToPromoteCustomer` | Email trùng CUSTOMER bị từ chối, không nâng role. |
+| `existingAdminPasswordIsNeverResetByStartup` | ADMIN có sẵn không encode/save password mới. |
+| `invalidConfigurationFailsWithoutLeakingPassword` | Config bootstrap sai bị chặn, exception không chứa password. |
+
+**[JwtConfigTest][jwttest]**
+
+| Method | Điều kiểm tra / giới hạn bằng chứng |
+| --- | --- |
+| `issuesHs256TokenWithStableUserIdRoleIssuerAudienceAndExpiry` | Encoder/decoder Nimbus thật xác nhận HS256, ID/role/issuer/audience/expiry và không chứa password/email. |
+| `rejectsInvalidAccessTokenClaims` | 8 trường hợp exp/issuer/audience/sub/role/thiếu claim/iat tương lai bị decoder từ chối. |
+| `rejectsTamperedSignature` | Sửa chữ ký token thật làm decode thất bại. |
+| `decoderRejectsOtherAlgorithmsEvenUsingTheSameKeyMaterial` | HS384 cùng key vẫn bị từ chối vì decoder chỉ HS256. |
+| `rejectsMissingOrMalformedSigningSecret` | Thiếu key hoặc Base64 sai làm cấu hình thất bại. |
+| `rejectsWeakSigningKeyWithoutIncludingItsValueInError` | Key dưới 32 byte bị từ chối, không lộ giá trị. |
+
+**[SecurityControllerTest][securityweb]**
+
+| Method | Điều kiểm tra / giới hạn bằng chứng |
+| --- | --- |
+| `unauthenticatedProtectedRequestsReturn401BeforeBusinessLogic` | 9 route bảo vệ trả 401 trước service. |
+| `customerCannotPerformAdministrativeOperations` | 9 action ADMIN trả 403 với identity CUSTOMER. |
+| `authenticationDatabaseFailureIs500RatherThanMisleading401` | DB converter ném lỗi, filter trả generic 500 thay 401. |
+| `loginBackendFailureIs500AndDoesNotRevealDetails` | Manager backend failure trả 500, không tiết lộ lỗi nội bộ. |
+| `catalogReadRemainsPublic` | GET catalog không token vẫn 200. |
+| `invalidBearerTokenReturnsGeneric401WithoutLeakingToken` | Decoder mock báo token sai, error JSON 401 không echo token. |
+| `registrationRejectsClientSelectedAdminRoleBeforeService` | Unknown role ADMIN trong JSON bị 400 trước AuthService. |
+| `loginFailuresHaveSameGenericMessageAnd401Status` | BadCredentials có response 401 chung. |
+| `malformedRegistrationIsValidatedWithoutAuthentication` | Register public vẫn @Valid và 400. |
+
+**[AuthenticationAuthorizationIT][authit]**
+
+| Method | Điều kiểm tra / giới hạn bằng chứng |
+| --- | --- |
+| `registrationStoresSaltedBcryptAndReturnsOnlySafeCustomerFields` | HTTP register 201; PostgreSQL chứa BCrypt cost12, matches thật, salt khác hash account khác, DTO không hash. |
+| `duplicateNormalizedEmailAndClientSelectedAdminAreRejected` | Email normalize trùng 409; chọn ADMIN 400 và không thêm admin. |
+| `concurrentRegistrationHasOneSuccessAndOneConflict` | Hai HTTP đăng ký cùng email: 201/409, DB chỉ một account; không chứng minh mọi interleaving. |
+| `utf8PasswordLimitAndDtoValidationReturn400WithoutPersistingUser` | Password ngắn/dài/quá byte 400; không insert account. |
+| `loginIsStatelessAndInvalidCredentialsUseSameGeneric401` | Login thật 200/no-store/không Set-Cookie, JWT sub đúng; sai password/email lạ chung 401 và request không token không được coi đã login. |
+| `customerOwnsCreatedOrderAndOtherCustomerCannotReadIt` | Owner trong DB/response đúng; owner và ADMIN GET200, CUSTOMER khác GET404. |
+| `requestCannotAssignAnotherOwner` | Client userId gây 400; order/stock không thay đổi. |
+| `customerIsForbiddenFromAdminOperationsEvenWithValidJwt` | JWT CUSTOMER thật bị403 ở9 action catalog/inventory/lifecycle. |
+| `adminCanRestockAndAdvanceOrCancelCustomerOrdersWithoutChangingBusinessRules` | ADMIN hủy customer order một lần, lặp409, fulfillment không trừ thêm, restock đúng stock. |
+| `serviceMethodAuthorizationCannotBeBypassedByCallingBeansDirectly` | Gọi Spring service proxy trực tiếp bằng CUSTOMER vẫn không restock/cancel được. |
+| `sameIdempotencyKeyIsIsolatedPerUserAndStillReplaysWithoutExtraStockWrite` | Một user replay200, đổi payload409; user khác cùng key tạo order riêng201, stock/receipt đúng. |
+| `concurrentSameUserAndKeyProducesOneOrderWithOneReplay` | Hai HTTP cùng user/key trả201/200 cùng order, stock chỉ trừ một lần; kiểm tra wait lock có kiểm soát vẫn ở OrderIdempotencyIT. |
+| `unauthorizedAttemptDoesNotConsumeIdempotencyKeyOrChangeStock` | 401 không claim key/đổi stock; login retry cùng key tạo được. |
+| `legacyUnownedOrdersAreAdminOnlyAndCanStillBeCancelled` | Legacy owner null ẩn với CUSTOMER, ADMIN đọc/hủy được. |
+| `invalidJwtOrStaleIdentityReturns401` | 7 kịch bản token expired/saiissuer/audience/chữký/thiếuexp hoặc user bị xóa/roleđổi đều401 và không echo token. |
+| `migrationPreservesV5OrdersReceiptsAndInventoryWithoutInventingUsersOrOwners` | Schema riêng V5→V6 giữ order/receipt/stock, owner null, không sinh user. |
+
+**ApiDocumentationIT bổ sung:** `openApiDocumentsBearerSecurityAndExplicitPublicOperationsWithoutPasswordResponses` kiểm tra bearerAuth, global security, register/login/catalog có security[] rỗng, password writeOnly và response schema không hash. Đây là test spec HTTP, không tự chứng minh authorization runtime; Auth IT mới làm phần đó. [ApiDocumentationIT][apidocit].
+
+**Rollback/concurrency thực vẫn ở đâu?** OrderManagementIT gây lỗi SQL sau write và quan sát pg_stat_activity Lock khi tranh stock/state; InventoryManagementIT chứng minh journal/stock rollback cùng nhau; OrderIdempotencyIT giữ transaction để kiểm tra wait/commit/rollback/timeout của unique claim. Security unit/MVC không được dùng thay bằng chứng này. Auth IT bổ sung role/ownership qua JWT thật và per-user scope. [OrderManagementIT][it], [InventoryManagementIT][inventoryit], [OrderIdempotencyIT][idemit], [AuthenticationAuthorizationIT][authit].
 
 ## Bản đồ source để mở nhanh khi luyện nói
 
@@ -1186,3 +1286,25 @@ Swagger UI ở /swagger-ui/index.html dùng /v3/api-docs; có thể tắt cả h
 [openapiconfig]: src/main/java/com/example/ordermanagement/config/OpenApiConfig.java
 [apidocit]: src/test/java/com/example/ordermanagement/integration/ApiDocumentationIT.java
 [demoscript]: scripts/demo.ps1
+[authservice]: src/main/java/com/example/ordermanagement/auth/AuthService.java
+[authcontroller]: src/main/java/com/example/ordermanagement/auth/AuthController.java
+[appuser]: src/main/java/com/example/ordermanagement/auth/AppUser.java
+[registerrequest]: src/main/java/com/example/ordermanagement/auth/RegisterRequest.java
+[loginrequest]: src/main/java/com/example/ordermanagement/auth/LoginRequest.java
+[adminbootstrap]: src/main/java/com/example/ordermanagement/auth/AdminBootstrap.java
+[jwtconfig]: src/main/java/com/example/ordermanagement/security/JwtConfig.java
+[jwtproperties]: src/main/java/com/example/ordermanagement/security/JwtProperties.java
+[securityconfig]: src/main/java/com/example/ordermanagement/security/SecurityConfig.java
+[tokenservice]: src/main/java/com/example/ordermanagement/security/TokenService.java
+[currentuser]: src/main/java/com/example/ordermanagement/security/CurrentUser.java
+[securityerrors]: src/main/java/com/example/ordermanagement/security/SecurityErrorHandler.java
+[authunit]: src/test/java/com/example/ordermanagement/auth/AuthServiceTest.java
+[bootstraptest]: src/test/java/com/example/ordermanagement/auth/AdminBootstrapTest.java
+[jwttest]: src/test/java/com/example/ordermanagement/security/JwtConfigTest.java
+[securityweb]: src/test/java/com/example/ordermanagement/web/SecurityControllerTest.java
+[authit]: src/test/java/com/example/ordermanagement/integration/AuthenticationAuthorizationIT.java
+[securityschema]: src/main/resources/db/migration/V6__users_order_ownership_and_scoped_idempotency.sql
+[initlocal]: scripts/init-local.ps1
+[authenticatedbase]: src/test/java/com/example/ordermanagement/support/AuthenticatedIntegrationTest.java
+[jwtfixture]: src/test/java/com/example/ordermanagement/support/JwtTestProperties.java
+[testsecurity]: src/test/java/com/example/ordermanagement/support/TestSecurity.java

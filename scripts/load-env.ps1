@@ -25,3 +25,6 @@ foreach ($line in Get-Content -LiteralPath $envFile -Encoding UTF8) {
 if ([string]::IsNullOrWhiteSpace($env:POSTGRES_PASSWORD)) {
     throw 'POSTGRES_PASSWORD must not be empty.'
 }
+if ([string]::IsNullOrWhiteSpace($env:JWT_SECRET_BASE64)) {
+    throw 'Run scripts/init-local.ps1 to generate JWT_SECRET_BASE64 in .env before starting the API.'
+}

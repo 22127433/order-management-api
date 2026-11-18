@@ -1,18 +1,49 @@
 # Order Management API - VS Code REST Client
-# Run numbered requests in order after starting the API.
+# Run the authentication requests first, then numbered requests. Credentials are prompted, not committed.
+# CUSTOMER creates/reads its own orders. ADMIN performs catalog/inventory/lifecycle actions.
 # Named responses supply real IDs, including when the database already has data.
 # Create requests add records each time they are sent. Change baseUrl if needed.
 # Documentation: https://github.com/Huachao/vscode-restclient#request-variables
 @baseUrl = http://localhost:8080
+@adminToken = {{loginAdmin.response.body.$.accessToken}}
+@customerToken = {{loginCustomer.response.body.$.accessToken}}
 @keyboardId = {{createKeyboard.response.body.$.id}}
 @mouseId = {{createMouse.response.body.$.id}}
 @orderId = {{createOrder.response.body.$.id}}
 @unusedProductId = {{createUnusedProduct.response.body.$.id}}
 @fulfillmentOrderId = {{createFulfillmentOrder.response.body.$.id}}
 
+### Authentication: Register CUSTOMER once (409 if email already exists)
+# @name registerCustomer
+# @prompt customerEmail Enter your local CUSTOMER email
+# @prompt password Enter your local CUSTOMER password (12-72 characters, at most 72 UTF-8 bytes)
+POST {{baseUrl}}/api/auth/register
+Content-Type: application/json
+
+{"email":"{{customerEmail}}","password":"{{password}}"}
+
+### Authentication: Login CUSTOMER; repeat after token expiry
+# @name loginCustomer
+# @prompt customerEmail Enter your registered local CUSTOMER email
+# @prompt password Enter your local CUSTOMER password
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{"email":"{{customerEmail}}","password":"{{password}}"}
+
+### Authentication: Login ADMIN provisioned by explicit operator bootstrap
+# @name loginAdmin
+# @prompt adminEmail Enter your local ADMIN email
+# @prompt password Enter your local ADMIN password
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{"email":"{{adminEmail}}","password":"{{password}}"}
+
 ### 01. Create Product: keyboard -> 201 + Location; stock 20
 # @name createKeyboard
 POST {{baseUrl}}/api/products
+Authorization: Bearer {{adminToken}}
 Content-Type: application/json
 
 {
@@ -25,6 +56,7 @@ Content-Type: application/json
 ### 02. Create Product: mouse -> 201 + Location; stock 10
 # @name createMouse
 POST {{baseUrl}}/api/products
+Authorization: Bearer {{adminToken}}
 Content-Type: application/json
 
 {
@@ -43,6 +75,7 @@ GET {{baseUrl}}/api/products/{{keyboardId}}
 ### 05. Update Product -> 200; PUT replaces metadata and must keep current stock unchanged
 # Run before creating the order. Prices remain consistent with the README example.
 PUT {{baseUrl}}/api/products/{{keyboardId}}
+Authorization: Bearer {{adminToken}}
 Content-Type: application/json
 
 {
@@ -55,6 +88,7 @@ Content-Type: application/json
 ### 06. Create Order -> 201 + Location; total 139.79; remaining stock 18 / 9
 # @name createOrder
 POST {{baseUrl}}/api/orders
+Authorization: Bearer {{customerToken}}
 Content-Type: application/json
 
 {
@@ -66,9 +100,11 @@ Content-Type: application/json
 
 ### 07. Get Order -> 200; status CREATED, total 139.79
 GET {{baseUrl}}/api/orders/{{orderId}}
+Authorization: Bearer {{customerToken}}
 
 ### 08. Validation Error -> 400; fieldErrors contains items[0].quantity
 POST {{baseUrl}}/api/orders
+Authorization: Bearer {{customerToken}}
 Content-Type: application/json
 
 {
@@ -80,6 +116,7 @@ Content-Type: application/json
 ### 09. Insufficient Stock Error -> 409; requested 21, available 18
 # Run before cancellation. No order is created and no stock is deducted.
 POST {{baseUrl}}/api/orders
+Authorization: Bearer {{customerToken}}
 Content-Type: application/json
 
 {
@@ -90,6 +127,7 @@ Content-Type: application/json
 
 ### 10. Duplicate Product Error -> 400; duplicate productId
 POST {{baseUrl}}/api/orders
+Authorization: Bearer {{customerToken}}
 Content-Type: application/json
 
 {
@@ -101,19 +139,23 @@ Content-Type: application/json
 
 ### 11. Cancel Order -> 200; status CANCELLED; restored stock 20 / 10
 POST {{baseUrl}}/api/orders/{{orderId}}/cancel
+Authorization: Bearer {{adminToken}}
 
 ### 12. Cancel Again -> 409; stock must not be restored twice
 POST {{baseUrl}}/api/orders/{{orderId}}/cancel
+Authorization: Bearer {{adminToken}}
 
 ### 13. Confirm Restored Stock -> 200; stockQuantity 20
 GET {{baseUrl}}/api/products/{{keyboardId}}
 
 ### 14. Delete Referenced Product -> 409, even after cancellation
 DELETE {{baseUrl}}/api/products/{{keyboardId}}
+Authorization: Bearer {{adminToken}}
 
 ### 15. Create a product with zero stock -> 201; INITIAL_STOCK history is still recorded
 # @name createUnusedProduct
 POST {{baseUrl}}/api/products
+Authorization: Bearer {{adminToken}}
 Content-Type: application/json
 
 {
@@ -125,6 +167,7 @@ Content-Type: application/json
 
 ### 16. Delete Product With Inventory History -> 409, even when initial stock is zero
 DELETE {{baseUrl}}/api/products/{{unusedProductId}}
+Authorization: Bearer {{adminToken}}
 
 ### 17. Get Retained Product -> 200; deletion was refused to preserve history
 GET {{baseUrl}}/api/products/{{unusedProductId}}
@@ -178,6 +221,7 @@ GET {{baseUrl}}/api/products?minPrice=abc
 # @name createFulfillmentOrder
 # The order from request 06 was cancelled; do not reuse it for this sequence.
 POST {{baseUrl}}/api/orders
+Authorization: Bearer {{customerToken}}
 Content-Type: application/json
 
 {
@@ -186,66 +230,83 @@ Content-Type: application/json
 
 ### 34. Ship Before Confirmation -> 409; remains CREATED, stock 19
 POST {{baseUrl}}/api/orders/{{fulfillmentOrderId}}/ship
+Authorization: Bearer {{adminToken}}
 
 ### 35. Confirm -> 200; CREATED -> CONFIRMED, stock stays 19
 POST {{baseUrl}}/api/orders/{{fulfillmentOrderId}}/confirm
+Authorization: Bearer {{adminToken}}
 
 ### 36. Confirm Again -> 409; no repeated transition
 POST {{baseUrl}}/api/orders/{{fulfillmentOrderId}}/confirm
+Authorization: Bearer {{adminToken}}
 
 ### 37. Cancel Confirmed Order -> 409; stock must not be restored
 POST {{baseUrl}}/api/orders/{{fulfillmentOrderId}}/cancel
+Authorization: Bearer {{adminToken}}
 
 ### 38. Ship -> 200; CONFIRMED -> SHIPPED, stock stays 19
 POST {{baseUrl}}/api/orders/{{fulfillmentOrderId}}/ship
+Authorization: Bearer {{adminToken}}
 
 ### 39. Deliver -> 200; SHIPPED -> DELIVERED, stock stays 19
 POST {{baseUrl}}/api/orders/{{fulfillmentOrderId}}/deliver
+Authorization: Bearer {{adminToken}}
 
 ### 40. Deliver Again -> 409; DELIVERED is terminal
 POST {{baseUrl}}/api/orders/{{fulfillmentOrderId}}/deliver
+Authorization: Bearer {{adminToken}}
 
 ### 41. Cancel Delivered Order -> 409; stock must not be restored
 POST {{baseUrl}}/api/orders/{{fulfillmentOrderId}}/cancel
+Authorization: Bearer {{adminToken}}
 
 ### 42. Get Delivered Order -> 200; original price, total, items, and createdAt retained
 GET {{baseUrl}}/api/orders/{{fulfillmentOrderId}}
+Authorization: Bearer {{customerToken}}
 
 ### 43. Verify Stock After Fulfillment -> 200; stockQuantity stays 19
 GET {{baseUrl}}/api/products/{{keyboardId}}
 
 ### 44. Confirm Previously Cancelled Order -> 409; cancelled order cannot be revived
 POST {{baseUrl}}/api/orders/{{orderId}}/confirm
+Authorization: Bearer {{adminToken}}
 
 ### 45. Manual Restock -> 200; keyboard stock 19 -> 24, journal records +5 and reason
 POST {{baseUrl}}/api/products/{{keyboardId}}/restock
+Authorization: Bearer {{adminToken}}
 Content-Type: application/json
 
 {"quantity":5,"reason":"Supplier delivery"}
 
 ### 46. Latest Inventory Movements -> 200; newest first, with product/order IDs and stock snapshots
 GET {{baseUrl}}/api/products/{{keyboardId}}/stock-movements?page=0&size=10&sort=createdAt,desc
+Authorization: Bearer {{adminToken}}
 
 ### 47. Inventory History Oldest First -> 200; INITIAL, -2, +2, -1, +5 in this sequence
 GET {{baseUrl}}/api/products/{{keyboardId}}/stock-movements?page=0&size=10&sort=createdAt,asc
+Authorization: Bearer {{adminToken}}
 
 ### 48. Invalid Restock Quantity -> 400; no inventory movement
 POST {{baseUrl}}/api/products/{{keyboardId}}/restock
+Authorization: Bearer {{adminToken}}
 Content-Type: application/json
 
 {"quantity":0,"reason":"Invalid quantity example"}
 
 ### 49. Missing Restock Reason -> 400
 POST {{baseUrl}}/api/products/{{keyboardId}}/restock
+Authorization: Bearer {{adminToken}}
 Content-Type: application/json
 
 {"quantity":1}
 
 ### 50. Invalid Inventory History Sorting -> 400
 GET {{baseUrl}}/api/products/{{keyboardId}}/stock-movements?sort=quantityDelta,desc
+Authorization: Bearer {{adminToken}}
 
 ### 51. Product PUT Cannot Replace Stock -> 409; stock and history remain unchanged
 PUT {{baseUrl}}/api/products/{{keyboardId}}
+Authorization: Bearer {{adminToken}}
 Content-Type: application/json
 
 {"name":"Mechanical Keyboard","description":"USB keyboard","price":59.90,"stockQuantity":0}
@@ -256,6 +317,7 @@ Content-Type: application/json
 # Change this key for a NEW intended order; retain it for retries 53-56.
 # It uses the keyboard ID so rerunning the initial product fixtures uses a different key.
 POST {{baseUrl}}/api/orders
+Authorization: Bearer {{customerToken}}
 Content-Type: application/json
 Idempotency-Key: demo-keyboard-{{keyboardId}}
 
@@ -263,6 +325,7 @@ Idempotency-Key: demo-keyboard-{{keyboardId}}
 
 ### 53. Retry Same Key and Payload -> 200; same order ID/body, stock stays 23
 POST {{baseUrl}}/api/orders
+Authorization: Bearer {{customerToken}}
 Content-Type: application/json
 Idempotency-Key: demo-keyboard-{{keyboardId}}
 
@@ -270,6 +333,7 @@ Idempotency-Key: demo-keyboard-{{keyboardId}}
 
 ### 54. Same Key With Different Quantity -> 409; no extra order or deduction
 POST {{baseUrl}}/api/orders
+Authorization: Bearer {{customerToken}}
 Content-Type: application/json
 Idempotency-Key: demo-keyboard-{{keyboardId}}
 
@@ -277,10 +341,12 @@ Idempotency-Key: demo-keyboard-{{keyboardId}}
 
 ### 55. Cancel the Keyed Order -> 200; keyboard stock 23 -> 24
 POST {{baseUrl}}/api/orders/{{createIdempotentOrder.response.body.$.id}}/cancel
+Authorization: Bearer {{adminToken}}
 
 ### 56. Retry Creation After Cancellation -> 200; original CREATED snapshot, no stock change
 # GET the order URL to see its current CANCELLED state.
 POST {{baseUrl}}/api/orders
+Authorization: Bearer {{customerToken}}
 Content-Type: application/json
 Idempotency-Key: demo-keyboard-{{keyboardId}}
 
@@ -288,6 +354,7 @@ Idempotency-Key: demo-keyboard-{{keyboardId}}
 
 ### 57. Invalid Idempotency-Key -> 400; no key reservation
 POST {{baseUrl}}/api/orders
+Authorization: Bearer {{customerToken}}
 Content-Type: application/json
 Idempotency-Key: invalid key with spaces
 
@@ -297,6 +364,7 @@ Idempotency-Key: invalid key with spaces
 # The failed key can be retried after sufficient restock, or used with corrected input.
 # A committed successful key would instead reject changed input.
 POST {{baseUrl}}/api/orders
+Authorization: Bearer {{customerToken}}
 Content-Type: application/json
 Idempotency-Key: demo-retry-after-error-{{keyboardId}}
 
@@ -311,3 +379,38 @@ GET {{baseUrl}}/v3/api-docs
 
 ### 61. Health -> 200 with status only when healthy
 GET {{baseUrl}}/actuator/health
+
+### 62. Missing Bearer Token -> 401; no order lookup or stock write
+GET {{baseUrl}}/api/orders/{{orderId}}
+
+### 63. CUSTOMER Cannot Restock -> 403; no stock/journal write
+POST {{baseUrl}}/api/products/{{keyboardId}}/restock
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{"quantity":1,"reason":"Forbidden customer operation"}
+
+### 64. CUSTOMER Cannot Cancel Even Its Own Order -> 403
+POST {{baseUrl}}/api/orders/{{orderId}}/cancel
+Authorization: Bearer {{customerToken}}
+
+### 65. Login Another CUSTOMER -> 200; register that account separately first
+# @name loginOtherCustomer
+# @prompt otherEmail Enter a different registered CUSTOMER email
+# @prompt password Enter that local CUSTOMER password
+POST {{baseUrl}}/api/auth/login
+Content-Type: application/json
+
+{"email":"{{otherEmail}}","password":"{{password}}"}
+
+### 66. Another Customer Cannot Read the First Customer's Order -> 404
+GET {{baseUrl}}/api/orders/{{orderId}}
+Authorization: Bearer {{loginOtherCustomer.response.body.$.accessToken}}
+
+### 67. Registration Cannot Select ADMIN -> 400
+# @prompt newEmail Enter an unused local email
+# @prompt password Enter a local test password
+POST {{baseUrl}}/api/auth/register
+Content-Type: application/json
+
+{"email":"{{newEmail}}","password":"{{password}}","role":"ADMIN"}

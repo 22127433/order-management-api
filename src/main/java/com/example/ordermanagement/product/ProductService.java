@@ -11,6 +11,7 @@ import com.example.ordermanagement.inventory.StockMovementQuery;
 import com.example.ordermanagement.inventory.StockMovementRepository;
 import com.example.ordermanagement.inventory.StockMovementResponse;
 import org.springframework.stereotype.Service;
+import org.springframework.security.access.prepost.PreAuthorize;
 import org.springframework.transaction.annotation.Transactional;
 
 @Service
@@ -28,6 +29,7 @@ public class ProductService {
     }
 
     @Transactional
+    @PreAuthorize("hasRole('ADMIN')")
     public ProductResponse create(ProductRequest request) {
         Product product = new Product(request.name(), request.description(), request.price(), request.stockQuantity());
         Product saved = productRepository.save(product);
@@ -50,6 +52,7 @@ public class ProductService {
     }
 
     @Transactional
+    @PreAuthorize("hasRole('ADMIN')")
     public ProductResponse update(Long id, ProductRequest request) {
         Product product = findForUpdate(id);
         if (request.stockQuantity() == null || request.stockQuantity() != product.getStockQuantity()) {
@@ -60,6 +63,7 @@ public class ProductService {
     }
 
     @Transactional
+    @PreAuthorize("hasRole('ADMIN')")
     public ProductResponse restock(Long id, RestockRequest request) {
         if (request == null || request.quantity() == null || request.quantity() <= 0
                 || request.reason() == null || request.reason().isBlank() || request.reason().length() > 500) {
@@ -72,6 +76,7 @@ public class ProductService {
         return ProductResponse.from(product);
     }
 
+    @PreAuthorize("hasRole('ADMIN')")
     public PageResponse<StockMovementResponse> stockMovements(Long id, StockMovementQuery query) {
         if (!productRepository.existsById(id)) {
             throw new ResourceNotFoundException("Product", id);
@@ -81,6 +86,7 @@ public class ProductService {
     }
 
     @Transactional
+    @PreAuthorize("hasRole('ADMIN')")
     public void delete(Long id) {
         Product product = findForUpdate(id);
         if (orderItemRepository.existsByProductId(id)) {

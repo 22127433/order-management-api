@@ -9,6 +9,10 @@ import org.slf4j.LoggerFactory;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.dao.OptimisticLockingFailureException;
 import org.springframework.dao.PessimisticLockingFailureException;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.core.AuthenticationException;
+import org.springframework.security.authentication.BadCredentialsException;
+import org.springframework.security.authentication.AuthenticationServiceException;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.HttpStatusCode;
@@ -24,6 +28,23 @@ import org.springframework.web.servlet.mvc.method.annotation.ResponseEntityExcep
 @RestControllerAdvice
 public class GlobalExceptionHandler extends ResponseEntityExceptionHandler {
     private static final Logger LOG = LoggerFactory.getLogger(GlobalExceptionHandler.class);
+
+    @ExceptionHandler(AuthenticationException.class)
+    ResponseEntity<Object> handleAuthentication(AuthenticationException exception, HttpServletRequest request) {
+        if (exception instanceof AuthenticationServiceException) {
+            LOG.error("Authentication backend failure for {}", request.getRequestURI(), exception);
+            return error(HttpStatus.INTERNAL_SERVER_ERROR, "An unexpected error occurred", request.getRequestURI(), List.of());
+        }
+        return ResponseEntity.status(HttpStatus.UNAUTHORIZED).header("WWW-Authenticate", "Bearer")
+                .header("Cache-Control", "no-store").body(body(HttpStatus.UNAUTHORIZED,
+                        exception instanceof BadCredentialsException ? "Invalid email or password" : "Authentication is required",
+                        request.getRequestURI(), List.of()));
+    }
+
+    @ExceptionHandler(AccessDeniedException.class)
+    ResponseEntity<Object> handleAccessDenied(AccessDeniedException exception, HttpServletRequest request) {
+        return error(HttpStatus.FORBIDDEN, "Access denied", request.getRequestURI(), List.of());
+    }
 
     @ExceptionHandler(ResourceNotFoundException.class)
     ResponseEntity<Object> handleNotFound(ResourceNotFoundException exception, HttpServletRequest request) {

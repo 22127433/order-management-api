@@ -27,6 +27,11 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
       SERVER_PORT: 8080
       API_DOCS_ENABLED: ${API_DOCS_ENABLED:-true}
+      # Empty is allowed here so database-only Compose keeps working; the API validates the key at startup.
+      JWT_SECRET_BASE64: ${JWT_SECRET_BASE64:-}
+      BOOTSTRAP_ADMIN_ENABLED: ${BOOTSTRAP_ADMIN_ENABLED:-false}
+      BOOTSTRAP_ADMIN_EMAIL: ${BOOTSTRAP_ADMIN_EMAIL:-}
+      BOOTSTRAP_ADMIN_PASSWORD: ${BOOTSTRAP_ADMIN_PASSWORD:-}
     ports:
       - "127.0.0.1:${SERVER_PORT:-8080}:8080"
     depends_on:

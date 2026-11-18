@@ -39,7 +39,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 @AutoConfigureMockMvc
 @Testcontainers
 @Import(ProductSearchIT.SqlCaptureConfiguration.class)
-class ProductSearchIT {
+class ProductSearchIT extends com.example.ordermanagement.support.AuthenticatedIntegrationTest {
     @Container
     static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine");
 
@@ -66,7 +66,6 @@ class ProductSearchIT {
 
     @Autowired private ProductService service;
     @Autowired private JdbcTemplate jdbc;
-    @Autowired private MockMvc mvc;
 
     @BeforeEach
     void cleanDatabase() {

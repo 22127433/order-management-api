@@ -10,6 +10,8 @@ import io.swagger.v3.oas.models.media.Content;
 import io.swagger.v3.oas.models.media.MediaType;
 import io.swagger.v3.oas.models.media.Schema;
 import io.swagger.v3.oas.models.responses.ApiResponse;
+import io.swagger.v3.oas.models.security.SecurityRequirement;
+import io.swagger.v3.oas.models.security.SecurityScheme;
 import io.swagger.v3.oas.models.tags.Tag;
 import java.util.List;
 import java.util.Map;
@@ -23,13 +25,22 @@ public class OpenApiConfig {
         OpenAPI api = new OpenAPI()
                 .info(new Info().title("Order Management API").version("1.0.0")
                         .description("Product catalog, order lifecycle, and transactional inventory. "
-                                + "No authentication is implemented. Prices and totals are calculated by the server. "
+                                + "Register/login for a Bearer JWT. CUSTOMER reads only its own orders; ADMIN manages catalog/inventory/lifecycle. "
+                                + "Prices and totals are calculated by the server. "
                                 + "Use a client-generated Idempotency-Key when retrying order creation. "
                                 + "Demo instructions: README.md and scripts/demo.ps1 in the repository."))
-                .tags(List.of(new Tag().name("Products").description("Catalog CRUD and database-side search/filtering"),
+                .addSecurityItem(new SecurityRequirement().addList("bearerAuth"))
+                .tags(List.of(new Tag().name("Authentication").description("Customer registration and stateless JWT login"),
+                        new Tag().name("Products").description("Public catalog reads; ADMIN writes"),
                         new Tag().name("Orders").description("Creation, idempotent retries, and lifecycle actions"),
                         new Tag().name("Inventory").description("Manual restock and immutable inventory movement history")))
                 .components(new Components()
+                        .addSecuritySchemes("bearerAuth", new SecurityScheme().type(SecurityScheme.Type.HTTP)
+                                .scheme("bearer").bearerFormat("JWT").description("Paste only the access token returned by login"))
+                        .addResponses("Unauthorized", error("Missing, invalid, expired token or invalid credentials", 401,
+                                "Authentication is required or bearer token is invalid", List.of()))
+                        .addResponses("Forbidden", error("Valid authentication but insufficient permission", 403,
+                                "Access denied", List.of()))
                         .addResponses("BadRequest", error("Invalid input, JSON, header, or query parameters", 400,
                                 "Request validation failed", List.of(Map.of("field", "items[0].quantity",
                                         "message", "must be greater than 0"))))
@@ -51,6 +62,8 @@ public class OpenApiConfig {
                                 "timestamp", "2026-11-17T10:00:00Z", "status", status,
                                 "error", switch (status) {
                                     case 400 -> "Bad Request";
+                                    case 401 -> "Unauthorized";
+                                    case 403 -> "Forbidden";
                                     case 404 -> "Not Found";
                                     case 409 -> "Conflict";
                                     default -> "Internal Server Error";

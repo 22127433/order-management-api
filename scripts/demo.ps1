@@ -1,4 +1,5 @@
-param([uri]$BaseUrl = 'http://localhost:8080')
+param([uri]$BaseUrl = 'http://localhost:8080',
+      [System.Management.Automation.PSCredential]$AdminCredential)
 
 $ErrorActionPreference = 'Stop'
 if (-not $BaseUrl.IsAbsoluteUri -or -not $BaseUrl.IsLoopback -or $BaseUrl.Scheme -notin @('http', 'https') -or
@@ -6,10 +7,11 @@ if (-not $BaseUrl.IsAbsoluteUri -or -not $BaseUrl.IsLoopback -or $BaseUrl.Scheme
     throw 'Demo data is restricted to a loopback API URL, such as http://localhost:8080.'
 }
 $demoApiRoot = $BaseUrl.GetLeftPart([System.UriPartial]::Authority)
+$demoAdminToken = ''
 
 function Invoke-DemoRequest {
     param([string]$Method, [string]$Path, [object]$Body = $null,
-          [int]$ExpectedStatus = 200, [string]$Key = '')
+          [int]$ExpectedStatus = 200, [string]$Key = '', [string]$AccessToken = $demoAdminToken)
     $options = @{
         Uri = $demoApiRoot + $Path
         Method = $Method
@@ -22,6 +24,7 @@ function Invoke-DemoRequest {
         $options.Body = ConvertTo-Json -InputObject $Body -Depth 8 -Compress
     }
     if ($Key) { $options.Headers['Idempotency-Key'] = $Key }
+    if ($AccessToken) { $options.Headers['Authorization'] = 'Bearer ' + $AccessToken }
     try {
         $response = Invoke-WebRequest @options
     } catch {
@@ -42,7 +45,17 @@ function Invoke-DemoRequest {
     }
 }
 
-Write-Host 'Creating demo records through the local API. Each run creates two new products and two orders.'
+if ($null -eq $AdminCredential) { $AdminCredential = Get-Credential -Message 'Local ADMIN account created by operator bootstrap' }
+$adminLogin = (Invoke-DemoRequest POST '/api/auth/login' @{
+    email = $AdminCredential.UserName; password = $AdminCredential.GetNetworkCredential().Password
+}).Body
+if ($adminLogin.user.role -ne 'ADMIN') { throw 'Demo requires an ADMIN account for product and inventory operations.' }
+$demoAdminToken = $adminLogin.accessToken
+$demoCustomerEmail = 'demo-' + [guid]::NewGuid().ToString('N') + '@example.com'
+$demoCustomerPassword = 'demo-' + [guid]::NewGuid().ToString('N')
+$null = Invoke-DemoRequest POST '/api/auth/register' @{ email = $demoCustomerEmail; password = $demoCustomerPassword } 201
+$demoCustomerToken = (Invoke-DemoRequest POST '/api/auth/login' @{ email = $demoCustomerEmail; password = $demoCustomerPassword }).Body.accessToken
+Write-Host 'Creating demo records through the local API. Each run creates one CUSTOMER, two products and two orders.'
 Write-Host 'No startup seed, direct SQL, or automatic cleanup is performed.'
 $keyboard = (Invoke-DemoRequest POST '/api/products' @{
     name = 'Demo Mechanical Keyboard'; description = 'Local portfolio demo'; price = 59.90; stockQuantity = 20
@@ -57,22 +70,22 @@ $null = Invoke-DemoRequest PUT "/api/products/$($keyboard.id)" @{
 
 $demoKey = 'demo-' + [guid]::NewGuid().ToString()
 $orderBody = @{ items = @(@{ productId = $keyboard.id; quantity = 2 }, @{ productId = $mouse.id; quantity = 1 }) }
-$created = Invoke-DemoRequest POST '/api/orders' $orderBody 201 $demoKey
-$retry = Invoke-DemoRequest POST '/api/orders' $orderBody 200 $demoKey
+$created = Invoke-DemoRequest POST '/api/orders' $orderBody 201 $demoKey $demoCustomerToken
+$retry = Invoke-DemoRequest POST '/api/orders' $orderBody 200 $demoKey $demoCustomerToken
 if ($created.Body.id -ne $retry.Body.id -or $retry.Headers['Idempotency-Replayed'] -ne 'true') {
     throw 'The idempotency replay did not match the created order.'
 }
-$null = Invoke-DemoRequest POST '/api/orders' @{ items = @(@{ productId = $keyboard.id; quantity = 1 }) } 409 $demoKey
+$null = Invoke-DemoRequest POST '/api/orders' @{ items = @(@{ productId = $keyboard.id; quantity = 1 }) } 409 $demoKey $demoCustomerToken
 $afterOrder = (Invoke-DemoRequest GET "/api/products/$($keyboard.id)").Body
 if ($afterOrder.stockQuantity -ne 18) { throw 'Expected stock 18 after keyed creation and retry.' }
-$null = Invoke-DemoRequest GET "/api/orders/$($created.Body.id)"
+$null = Invoke-DemoRequest GET "/api/orders/$($created.Body.id)" -AccessToken $demoCustomerToken
 $null = Invoke-DemoRequest POST "/api/orders/$($created.Body.id)/cancel"
-$cancelReplay = (Invoke-DemoRequest POST '/api/orders' $orderBody 200 $demoKey).Body
+$cancelReplay = (Invoke-DemoRequest POST '/api/orders' $orderBody 200 $demoKey $demoCustomerToken).Body
 if ($cancelReplay.status -ne 'CREATED') { throw 'A replay must retain the original creation snapshot.' }
 
 $fulfillment = (Invoke-DemoRequest POST '/api/orders' @{
     items = @(@{ productId = $keyboard.id; quantity = 1 })
-} 201).Body
+} 201 -AccessToken $demoCustomerToken).Body
 foreach ($action in @('confirm', 'ship', 'deliver')) {
     $null = Invoke-DemoRequest POST "/api/orders/$($fulfillment.id)/$action"
 }
@@ -91,6 +104,7 @@ if ($restocked.stockQuantity -ne 24 -or $history.totalElements -ne 5) {
 Write-Host 'Demo completed. Inspect these IDs in Swagger UI; records remain in your local database.'
 [pscustomobject]@{
     KeyboardId = $keyboard.id
+    CustomerUserId = $created.Body.userId
     MouseId = $mouse.id
     CancelledOrderId = $created.Body.id
     DeliveredOrderId = $fulfillment.id

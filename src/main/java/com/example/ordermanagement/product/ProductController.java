@@ -5,6 +5,7 @@ import com.example.ordermanagement.inventory.RestockRequest;
 import com.example.ordermanagement.inventory.StockMovementQuery;
 import com.example.ordermanagement.inventory.StockMovementResponse;
 import io.swagger.v3.oas.annotations.Operation;
+import io.swagger.v3.oas.annotations.security.SecurityRequirements;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.headers.Header;
 import io.swagger.v3.oas.annotations.media.Schema;
@@ -32,6 +33,8 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/products")
 @Validated
 @ApiResponses({
+        @ApiResponse(responseCode = "401", ref = "#/components/responses/Unauthorized"),
+        @ApiResponse(responseCode = "403", ref = "#/components/responses/Forbidden"),
         @ApiResponse(responseCode = "400", ref = "#/components/responses/BadRequest"),
         @ApiResponse(responseCode = "500", ref = "#/components/responses/InternalError")
 })
@@ -43,7 +46,7 @@ public class ProductController {
     }
 
     @PostMapping
-    @Operation(tags = "Products", summary = "Create a product", description = "Records INITIAL_STOCK in the same transaction. "
+    @Operation(tags = "Products", summary = "Create a product", description = "ADMIN only. Records INITIAL_STOCK in the same transaction. "
             + "The application never loads demo data automatically.")
     @ApiResponse(responseCode = "201", description = "Created product", useReturnTypeSchema = true,
             headers = @Header(name = "Location", description = "Created product URL", schema = @Schema(type = "string")))
@@ -53,6 +56,7 @@ public class ProductController {
     }
 
     @GetMapping
+    @SecurityRequirements
     @Operation(tags = "Products", summary = "Search and paginate products", description = "All filters are optional and combined with AND. "
             + "Filtering, counting, sorting, and pagination run in PostgreSQL. Price bounds are inclusive and nonnegative; "
             + "minPrice must not exceed maxPrice. page * size must fit a signed 32-bit integer. "
@@ -79,6 +83,7 @@ public class ProductController {
     }
 
     @GetMapping("/{id}")
+    @SecurityRequirements
     @Operation(tags = "Products", summary = "Get a product")
     @ApiResponse(responseCode = "200", description = "Product details", useReturnTypeSchema = true)
     @ApiResponse(responseCode = "404", ref = "#/components/responses/NotFound")
@@ -87,7 +92,7 @@ public class ProductController {
     }
 
     @PutMapping("/{id}")
-    @Operation(tags = "Products", summary = "Replace product metadata", description = "Requires the current stockQuantity unchanged; "
+    @Operation(tags = "Products", summary = "Replace product metadata", description = "ADMIN only. Requires the current stockQuantity unchanged; "
             + "a different stock value returns 409. Use restock to add inventory. Existing order price snapshots are preserved.")
     @ApiResponse(responseCode = "200", description = "Updated product", useReturnTypeSchema = true)
     @ApiResponse(responseCode = "404", ref = "#/components/responses/NotFound")
@@ -97,7 +102,7 @@ public class ProductController {
     }
 
     @PostMapping("/{id}/restock")
-    @Operation(tags = "Inventory", summary = "Restock a product", description = "Adds a positive quantity and a MANUAL_RESTOCK movement "
+    @Operation(tags = "Inventory", summary = "Restock a product", description = "ADMIN only. Adds a positive quantity and a MANUAL_RESTOCK movement "
             + "atomically under a product write lock. Stock overflow returns 409. This endpoint does not support Idempotency-Key; "
             + "repeating a successful call adds stock again.")
     @ApiResponse(responseCode = "200", description = "Product with updated stock", useReturnTypeSchema = true)
@@ -108,7 +113,7 @@ public class ProductController {
     }
 
     @GetMapping("/{id}/stock-movements")
-    @Operation(tags = "Inventory", summary = "Get paginated inventory history", description = "Product-scoped history, newest first by default. "
+    @Operation(tags = "Inventory", summary = "Get paginated inventory history", description = "ADMIN only. Product-scoped history, newest first by default. "
             + "Sorts timestamp ties by ID in the same direction. Legacy products can have no history: no backfill is performed. "
             + "page * size must fit a signed 32-bit integer.")
     @ApiResponse(responseCode = "200", description = "Inventory movement page", useReturnTypeSchema = true)
@@ -124,7 +129,7 @@ public class ProductController {
     }
 
     @DeleteMapping("/{id}")
-    @Operation(tags = "Products", summary = "Delete an unreferenced legacy product", description = "Returns 409 when any order item or inventory "
+    @Operation(tags = "Products", summary = "Delete an unreferenced legacy product", description = "ADMIN only. Returns 409 when any order item or inventory "
             + "movement references the product. Newly created products have INITIAL_STOCK history and cannot be deleted.")
     @ApiResponse(responseCode = "204", description = "Product deleted; empty response")
     @ApiResponse(responseCode = "404", ref = "#/components/responses/NotFound")

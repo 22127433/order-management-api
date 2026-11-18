@@ -1,5 +1,11 @@
 package com.example.ordermanagement.web;
 
+import com.example.ordermanagement.auth.UserRepository;
+import com.example.ordermanagement.security.SecurityConfig;
+import org.springframework.security.oauth2.jwt.JwtDecoder;
+import org.springframework.security.test.context.support.WithMockUser;
+import org.springframework.context.annotation.Import;
+
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.verifyNoInteractions;
@@ -31,7 +37,11 @@ import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
 
 @WebMvcTest(ProductController.class)
+@Import(SecurityConfig.class)
+@WithMockUser(username = "1", roles = "ADMIN")
 class InventoryControllerTest {
+    @MockitoBean private JwtDecoder jwtDecoder;
+    @MockitoBean private UserRepository users;
     @Autowired private MockMvc mvc;
     @MockitoBean private ProductService service;
 

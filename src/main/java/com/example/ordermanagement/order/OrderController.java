@@ -26,6 +26,8 @@ import org.springframework.web.bind.annotation.RestController;
 @Validated
 @Tag(name = "Orders")
 @ApiResponses({
+        @ApiResponse(responseCode = "401", ref = "#/components/responses/Unauthorized"),
+        @ApiResponse(responseCode = "403", ref = "#/components/responses/Forbidden"),
         @ApiResponse(responseCode = "400", ref = "#/components/responses/BadRequest"),
         @ApiResponse(responseCode = "500", ref = "#/components/responses/InternalError")
 })
@@ -40,12 +42,13 @@ public class OrderController {
     }
 
     @PostMapping
-    @Operation(summary = "Create an order", description = "Accepts 1–100 distinct products, each with quantity 1–1000000. "
+    @Operation(summary = "Create an order", description = "CUSTOMER or ADMIN. Owner comes from the authenticated principal; client userId is rejected. "
+            + "Accepts 1–100 distinct products, each with quantity 1–1000000. "
             + "Locks products by ascending ID, calculates BigDecimal price snapshots, and deducts stock with inventory movements "
             + "in one transaction. An optional Idempotency-Key makes retries durable in PostgreSQL: equivalent payloads replay the "
             + "original creation snapshot, even after the order changes state. Reordering items does not change payload identity. "
             + "A different valid payload using a committed key returns 409. Concurrent callers wait for the key owner; lock timeout "
-            + "returns 409 for retry. Failed transactions do not consume keys. Keys are global to this endpoint and retained indefinitely. "
+            + "returns 409 for retry. Failed transactions do not consume keys. Keys are scoped per authenticated user and retained indefinitely. "
             + "Without the header, each successful call creates another order; no universal exactly-once guarantee is claimed.")
     @ApiResponse(responseCode = "201", description = "New order created", useReturnTypeSchema = true,
             headers = {
@@ -77,7 +80,8 @@ public class OrderController {
     }
 
     @GetMapping("/{id}")
-    @Operation(summary = "Get an order", description = "Returns current lifecycle status and original monetary snapshots.")
+    @Operation(summary = "Get an order", description = "CUSTOMER: own orders only; other users' orders return 404. ADMIN: any order, "
+            + "including legacy unowned orders. Returns current lifecycle status and original monetary snapshots.")
     @ApiResponse(responseCode = "200", description = "Order with items", useReturnTypeSchema = true)
     @ApiResponse(responseCode = "404", ref = "#/components/responses/NotFound")
     public OrderResponse getById(@PathVariable @Positive Long id) {
@@ -85,7 +89,7 @@ public class OrderController {
     }
 
     @PostMapping("/{id}/confirm")
-    @Operation(summary = "Confirm an order", description = "Only CREATED → CONFIRMED. Locks the order; does not deduct stock again. "
+    @Operation(summary = "Confirm an order", description = "ADMIN only. Only CREATED → CONFIRMED. Locks the order; does not deduct stock again. "
             + "Repeated or invalid transitions return 409.")
     @ApiResponse(responseCode = "200", description = "Confirmed order", useReturnTypeSchema = true)
     @ApiResponse(responseCode = "404", ref = "#/components/responses/NotFound")
@@ -95,7 +99,7 @@ public class OrderController {
     }
 
     @PostMapping("/{id}/ship")
-    @Operation(summary = "Mark an order as shipped", description = "Only CONFIRMED → SHIPPED. Records handover state, "
+    @Operation(summary = "Mark an order as shipped", description = "ADMIN only. Only CONFIRMED → SHIPPED. Records handover state, "
             + "without a carrier integration or additional stock deduction. Repeated/invalid transitions return 409.")
     @ApiResponse(responseCode = "200", description = "Shipped order", useReturnTypeSchema = true)
     @ApiResponse(responseCode = "404", ref = "#/components/responses/NotFound")
@@ -105,7 +109,7 @@ public class OrderController {
     }
 
     @PostMapping("/{id}/deliver")
-    @Operation(summary = "Mark an order as delivered", description = "Only SHIPPED → DELIVERED. No stock change. "
+    @Operation(summary = "Mark an order as delivered", description = "ADMIN only. Only SHIPPED → DELIVERED. No stock change. "
             + "DELIVERED is terminal; repeated/invalid transitions return 409.")
     @ApiResponse(responseCode = "200", description = "Delivered order", useReturnTypeSchema = true)
     @ApiResponse(responseCode = "404", ref = "#/components/responses/NotFound")
@@ -115,7 +119,7 @@ public class OrderController {
     }
 
     @PostMapping("/{id}/cancel")
-    @Operation(summary = "Cancel a newly created order", description = "Only CREATED → CANCELLED. Locks the order first, "
+    @Operation(summary = "Cancel a newly created order", description = "ADMIN only. Only CREATED → CANCELLED. Locks the order first, "
             + "then products by ascending ID. Stock restoration, cancellation movements, and state change commit together. "
             + "Cancellation restores stock once; repeated cancellation or cancelling any other state returns 409.")
     @ApiResponse(responseCode = "200", description = "Cancelled order", useReturnTypeSchema = true)

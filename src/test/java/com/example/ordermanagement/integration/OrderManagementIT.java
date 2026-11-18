@@ -52,7 +52,7 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 @SpringBootTest
 @AutoConfigureMockMvc
 @Testcontainers
-class OrderManagementIT {
+class OrderManagementIT extends com.example.ordermanagement.support.AuthenticatedIntegrationTest {
     @Container
     static final PostgreSQLContainer<?> POSTGRES = new PostgreSQLContainer<>("postgres:17-alpine");
 
@@ -67,7 +67,6 @@ class OrderManagementIT {
     @Autowired private OrderService orderService;
     @Autowired private OrderRepository orderRepository;
     @Autowired private JdbcTemplate jdbc;
-    @Autowired private MockMvc mvc;
     @Autowired private ObjectMapper objectMapper;
     @Autowired private PlatformTransactionManager transactionManager;
 
@@ -330,7 +329,7 @@ class OrderManagementIT {
             OrderResponse result = objectMapper.readValue(body, OrderResponse.class);
             OrderStatus expected = targetStatus(action);
             assertThat(result).isEqualTo(new OrderResponse(persisted.id(), expected, persisted.totalAmount(),
-                    persisted.createdAt(), persisted.items()));
+                    persisted.createdAt(), persisted.items(), persisted.userId()));
             assertThat(orderService.getById(created.id()).status()).isEqualTo(expected);
             assertThat(productService.getById(product.id()).stockQuantity()).isEqualTo(7);
         }
@@ -571,7 +570,7 @@ class OrderManagementIT {
                                                String lockedTable) throws Exception {
         CountDownLatch firstHasWritten = new CountDownLatch(1);
         CountDownLatch allowFirstCommit = new CountDownLatch(1);
-        try (var executor = Executors.newFixedThreadPool(2)) {
+        try (var executor = authenticatedExecutor(2)) {
             var one = executor.submit(() -> new TransactionTemplate(transactionManager).execute(status -> {
                 Boolean result = first.get();
                 firstHasWritten.countDown();
@@ -625,7 +624,7 @@ class OrderManagementIT {
     private List<Boolean> raceTasks(Callable<Boolean> first, Callable<Boolean> second) throws Exception {
         CountDownLatch ready = new CountDownLatch(2);
         CountDownLatch start = new CountDownLatch(1);
-        try (var executor = Executors.newFixedThreadPool(2)) {
+        try (var executor = authenticatedExecutor(2)) {
             var one = executor.submit(gated(first, ready, start));
             var two = executor.submit(gated(second, ready, start));
             try {
