@@ -73,8 +73,34 @@ class ApiDocumentationIT extends com.example.ordermanagement.support.JwtTestProp
                 }
             }
         }
-        assertThat(operations).isEqualTo(15);
+        assertThat(operations).isEqualTo(16);
         assertReferencesResolve(spec, spec);
+    }
+
+    @Test
+    void orderListingDocumentsFiltersSummaryPaginationAndInheritedBearerSecurity() {
+        JsonNode spec = specification();
+        JsonNode listing = spec.path("paths").path("/api/orders").path("get");
+        assertThat(listing.path("summary").asText()).isEqualTo("List orders");
+        assertThat(listing.path("description").asText()).contains("CUSTOMER", "ADMIN", "createdAt DESC, id DESC");
+        assertThat(listing.has("security")).isFalse(); // Global bearer requirement is inherited, never overridden with [].
+        assertThat(spec.path("security").get(0).has("bearerAuth")).isTrue();
+        assertThat(listing.path("parameters").size()).isEqualTo(5);
+        for (String name : List.of("status", "from", "to", "page", "size")) {
+            assertThat(parameter(listing, name).path("in").asText()).isEqualTo("query");
+        }
+        assertThat(parameter(listing, "from").at("/schema/format").asText()).isEqualTo("date-time");
+        assertThat(parameter(listing, "to").at("/schema/format").asText()).isEqualTo("date-time");
+        assertThat(parameter(listing, "page").at("/schema/default").asInt()).isZero();
+        assertThat(parameter(listing, "size").at("/schema/default").asInt()).isEqualTo(20);
+        assertThat(parameter(listing, "size").at("/schema/maximum").asInt()).isEqualTo(100);
+        for (String code : List.of("200", "400", "401", "403", "500")) {
+            assertThat(listing.path("responses").has(code)).as(code).isTrue();
+        }
+        JsonNode summary = spec.at("/components/schemas/OrderSummaryResponse/properties");
+        assertThat(summary.size()).isEqualTo(4);
+        assertThat(summary.has("items")).isFalse();
+        assertThat(summary.has("userId")).isFalse();
     }
 
     @Test

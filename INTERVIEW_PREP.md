@@ -1204,6 +1204,57 @@ Unit test không mở transaction PostgreSQL. JwtConfigTest dùng Nimbus thật 
 
 **Rollback/concurrency thực vẫn ở đâu?** OrderManagementIT gây lỗi SQL sau write và quan sát pg_stat_activity Lock khi tranh stock/state; InventoryManagementIT chứng minh journal/stock rollback cùng nhau; OrderIdempotencyIT giữ transaction để kiểm tra wait/commit/rollback/timeout của unique claim. Security unit/MVC không được dùng thay bằng chứng này. Auth IT bổ sung role/ownership qua JWT thật và per-user scope. [OrderManagementIT][it], [InventoryManagementIT][inventoryit], [OrderIdempotencyIT][idemit], [AuthenticationAuthorizationIT][authit].
 
+### 8.11. Order listing: ownership, lọc và phân trang tại database
+
+**Ví dụ nền tảng:** Một khách có bốn đơn, khách khác có hai đơn. Khi khách đầu yêu cầu size=2, database phải lọc theo owner trước, rồi mới chọn hai đơn. Nếu chỉ phân trang toàn bộ sau đó mới bỏ đơn của người khác trong Java, trang và tổng sẽ sai, đồng thời có nguy cơ lộ dữ liệu. Căn cứ implementation: [OrderService.findAll][os], [OrderSpecifications][listspec], [OrderRepository][or].
+
+**Trace GET /api/orders:** SecurityConfig yêu cầu CUSTOMER/ADMIN → OrderController bind status/from/to/page/size → OrderListQuery kiểm tra range, page/size và offset → OrderService lấy owner ID từ CurrentUser (ADMIN không có điều kiện owner) → Specification kết hợp các predicate AND → Spring Data fluent query `as(OrderSummaryResponse.class).page(...)` → PostgreSQL SELECT bốn cột kèm ORDER BY/OFFSET/FETCH và count có cùng predicate → PageResponse. Không có userId trong query DTO; query parameter userId lạ bị bỏ qua và không thay đổi scope. Căn cứ: [SecurityConfig][securityconfig], [OrderController][oc], [OrderListQuery][listquery], [OrderService][os], [OrderSpecifications][listspec], [OrderSummaryResponse][listsummary].
+
+**Tại sao DTO riêng?** Danh sách chỉ cần id/status/totalAmount/createdAt. Constructor projection đọc đúng bốn thuộc tính này, không gọi mapper OrderResponse.from và không truy cập items/user. Nhờ đó không cần tải toàn bộ OrderItem hoặc entity User. GET /api/orders/{id} vẫn trả OrderResponse chi tiết. Căn cứ: [OrderSummaryResponse][listsummary], [OrderService.findAll/getById][os], [OrderResponse][oresp].
+
+**Bộ lọc:** status enum phân biệt hoa thường; from/to là Instant có timezone, inclusive và from<=to. Page mặc định0, size20, giới hạn1–100; `(long) page * size` phải fit int theo JPA setFirstResult. Thứ tự cố định createdAt DESC, id DESC; ID phá hòa timestamp. ADMIN không join/filter user nên vẫn thấy legacy owner NULL; CUSTOMER predicate user_id=principal ID loại mọi owner khác/NULL. Không có schema/migration mới; chưa tuyên bố index hay benchmark mới. Căn cứ: [OrderListQuery][listquery], [OrderSpecifications][listspec], [OrderRepository][or], [V6][securityschema].
+
+**Câu trả lời phỏng vấn:** “Em thêm GET collection nhưng giữ DTO chi tiết và nghiệp vụ ghi cũ. Ownership được đưa vào SQL cùng filter, trước pagination và count. Spring Data chọn trực tiếp bốn cột sang summary record, nên không duyệt items và tránh N+1. Em dùng timestamp DESC cùng ID DESC để thứ tự rõ khi timestamp trùng; invalid range/offset/status trả400 và thiếu token trả401. PostgreSQL integration test kiểm tra cả kết quả lẫn SQL thực.” [OrderService][os], [OrderListingIT][listingit], [OrderListingControllerTest][listingweb].
+
+**Unit — [OrderListQueryTest][listingunit]** (không có DB/transaction):
+
+| Method | Ý nghĩa |
+| --- | --- |
+| usesStableNewestFirstOrderAndExistingPaginationDefaults | Xác nhận page0/size20 và thứ tự timestamp DESC, ID DESC. |
+| rejectsInvalidPageSizeOrJpaOffset | Sáu biên page âm, size không hợp lệ, offset vượt int bị chặn. |
+| acceptsMaximumJpaOffsetWithoutIntegerOverflow | Kiểm tra offset int tối đa và size100 được phép; không suy ra query DB đã chạy. |
+| rejectsReversedTimeRange | from>to gây BadRequestException. |
+| acceptsEqualAndOneSidedTimeBounds | Bằng nhau hoặc chỉ một mốc vẫn hợp lệ. |
+
+**MVC — [OrderListingControllerTest][listingweb]** (filter/MVC thật, service mock):
+
+| Method | Ý nghĩa |
+| --- | --- |
+| bothRolesCanListWithDefaultsAndSummaryDto | CUSTOMER và ADMIN được GET, đúng DTO summary/PageResponse. |
+| bindsStatusOffsetTimestampsAndPageParameters | ISO offset+07 được quy về cùng Instant; bind status/page/size đúng. |
+| malformedFiltersReturn400BeforeCallingService | Enum/date/local time/page/size sai trả400 trước service. |
+| reversedRangeAndOverflowOffsetReturn400 | Kiểm tra cross-field range và offset overflow ở HTTP. |
+| anonymousListingReturns401BeforeValidationOrService | Chưa xác thực nhận401 dù filter sai; không vào nghiệp vụ. |
+| listingPermissionDoesNotOpenAdministrativeOrderActions | CUSTOMER vẫn403 cho mọi action lifecycle/cancel; role lạ không được list. |
+| clientOwnerAndSortParametersDoNotBecomeQueryInputs | userId/sort lạ không được bind thành scope hoặc tùy chọn sort. |
+
+**PostgreSQL — [OrderListingIT][listingit]** (MockMvc với JWT thật, JPA/service/PostgreSQL thật, không mock repository):
+
+| Method | Bằng chứng |
+| --- | --- |
+| customersOnlySeeTheirOwnOrdersAndCannotChooseAnotherOwner | Hai khách thấy tập đơn riêng, query userId không thể xem owner khác; total riêng. |
+| adminSeesEveryOwnerAndLegacyWithoutAnInnerUserJoin | ADMIN thấy tất cả và lọc SHIPPED vẫn trả legacy owner NULL. |
+| statusAndInclusiveTimeBoundsCombineWithOwnershipBeforePaging | AND status/range/owner trước page, count chỉ hàng khớp. |
+| oneSidedAndEqualTimeBoundsAreInclusiveAndNormalizeOffsets | Kiểm tra lower/upper bound riêng, equal bound, timezone offset. |
+| databasePagesUseDescendingIdToBreakEqualTimestampTies | Timestamp trùng vẫn ID DESC qua hai trang; sort lạ không ghi đè. |
+| emptyCustomerNoMatchesAndOutOfRangePageRetainCorrectTotals | Không có đơn, filter không khớp hoặc page vượt cuối đều trả200 đúng totals. |
+| summarySelectAndCountUseDatabasePaginationWithoutLoadingItems | SQL chỉ SELECT bốn cột + count, có predicate owner/OFFSET/FETCH; không query items, không lock hoặc join user. Hibernate có thể dùng ORDER BY vị trí cột; kết quả test xác nhận thứ tự thực. |
+| filteringPredicatesAppearInBothSqlSelectAndCount | SQL SELECT/count đều có user/status/from/to predicate. |
+| listingDoesNotChangeDetailResponseOrAnyBusinessData | Detail vẫn có items/userId; stock, movements, receipt và số đơn không đổi. |
+| unauthenticatedRequestIs401AndInvalidFiltersAre400WithRealBackend | Kiểm tra status HTTP bằng filter và backend thật. |
+
+**OpenAPI:** `orderListingDocumentsFiltersSummaryPaginationAndInheritedBearerSecurity` trong [ApiDocumentationIT][apidocit] kiểm tra5 query params, schema summary4 field, pagination/status/error và bearer requirement kế thừa. Spec hiện có16 operations/12paths; mốc smoke15 operation ngày18/11 ở trên là lịch sử. Các test listing không thay cho bằng chứng rollback/concurrency của OrderManagementIT/OrderIdempotencyIT; toàn bộ regression vẫn được giữ. [OrderManagementIT][it], [OrderIdempotencyIT][idemit].
+
 ## Bản đồ source để mở nhanh khi luyện nói
 
 | Muốn chứng minh điều gì? | Mở file/method |
@@ -1308,3 +1359,15 @@ Unit test không mở transaction PostgreSQL. JwtConfigTest dùng Nimbus thật 
 [authenticatedbase]: src/test/java/com/example/ordermanagement/support/AuthenticatedIntegrationTest.java
 [jwtfixture]: src/test/java/com/example/ordermanagement/support/JwtTestProperties.java
 [testsecurity]: src/test/java/com/example/ordermanagement/support/TestSecurity.java
+
+[listingit]: src/test/java/com/example/ordermanagement/integration/OrderListingIT.java
+
+[listingunit]: src/test/java/com/example/ordermanagement/order/OrderListQueryTest.java
+
+[listingweb]: src/test/java/com/example/ordermanagement/web/OrderListingControllerTest.java
+
+[listquery]: src/main/java/com/example/ordermanagement/order/OrderListQuery.java
+
+[listspec]: src/main/java/com/example/ordermanagement/order/OrderSpecifications.java
+
+[listsummary]: src/main/java/com/example/ordermanagement/order/OrderSummaryResponse.java

@@ -414,3 +414,53 @@ POST {{baseUrl}}/api/auth/register
 Content-Type: application/json
 
 {"email":"{{newEmail}}","password":"{{password}}","role":"ADMIN"}
+
+### 68. List Own Orders -> 200; summaries only, newest createdAt then ID first
+GET {{baseUrl}}/api/orders
+Authorization: Bearer {{customerToken}}
+
+### 69. ADMIN List All Orders -> 200; includes legacy orders without an owner
+GET {{baseUrl}}/api/orders?page=0&size=20
+Authorization: Bearer {{adminToken}}
+
+### 70. Filter Own Orders by Status and Inclusive Time Range -> 200
+# Adjust the dates to match your local demo records. No userId query parameter is needed or accepted as an owner filter.
+GET {{baseUrl}}/api/orders?status=CREATED&from=2026-11-01T00:00:00Z&to=2026-11-30T23:59:59Z&page=0&size=5
+Authorization: Bearer {{customerToken}}
+
+### 71. Second Page of Own Orders -> 200; totalElements still counts all matching own orders
+GET {{baseUrl}}/api/orders?page=1&size=1
+Authorization: Bearer {{customerToken}}
+
+### 72. No Orders in an Old Time Range -> 200 with empty content
+# Assumes your database has no orders from this illustrative historical period.
+GET {{baseUrl}}/api/orders?from=2000-01-01T00:00:00Z&to=2000-01-02T00:00:00Z
+Authorization: Bearer {{customerToken}}
+
+### 73. List Orders Without a Bearer Token -> 401
+GET {{baseUrl}}/api/orders
+
+### 74. Invalid Order Status -> 400
+GET {{baseUrl}}/api/orders?status=UNKNOWN
+Authorization: Bearer {{customerToken}}
+
+### 75. Reversed Time Range -> 400
+GET {{baseUrl}}/api/orders?from=2026-11-30T00:00:00Z&to=2026-11-01T00:00:00Z
+Authorization: Bearer {{customerToken}}
+
+### 76. Oversized Page -> 400
+GET {{baseUrl}}/api/orders?size=101
+Authorization: Bearer {{customerToken}}
+
+### 77. JPA Offset Overflow -> 400
+GET {{baseUrl}}/api/orders?page=2147483647&size=100
+Authorization: Bearer {{customerToken}}
+
+### 78. Numeric Timezone Offset -> 200; same instant as 2026-11-01T00:00:00Z
+GET {{baseUrl}}/api/orders?from=2026-11-01T07:00:00%2B07:00
+Authorization: Bearer {{customerToken}}
+
+### 79. Another CUSTOMER Lists Only Its Own Orders -> 200, never the first customer's orders
+# Run loginOtherCustomer first. Empty content is valid when this second account has no orders.
+GET {{baseUrl}}/api/orders
+Authorization: Bearer {{loginOtherCustomer.response.body.$.accessToken}}

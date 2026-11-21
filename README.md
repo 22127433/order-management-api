@@ -102,6 +102,7 @@ Base URL: `http://localhost:8080`. JSON bodies. Supply `Authorization: Bearer <a
 | POST | `/api/products/{id}/restock` | ADMIN | 200 |
 | GET | `/api/products/{id}/stock-movements` | ADMIN | 200, page |
 | POST | `/api/orders` | CUSTOMER or ADMIN; owner from principal | 201, or 200 replay |
+| GET | `/api/orders` | CUSTOMER: own orders; ADMIN: all, including legacy | 200, summary page |
 | GET | `/api/orders/{id}` | CUSTOMER owner or ADMIN | 200 |
 | POST | `/api/orders/{id}/confirm` | ADMIN; CREATED -> CONFIRMED | 200 |
 | POST | `/api/orders/{id}/ship` | ADMIN; CONFIRMED -> SHIPPED | 200 |
@@ -109,6 +110,32 @@ Base URL: `http://localhost:8080`. JSON bodies. Supply `Authorization: Bearer <a
 | POST | `/api/orders/{id}/cancel` | ADMIN; CREATED -> CANCELLED | 200 |
 
 Customer lookups use `findByIdAndUserId`; another customer's order and an absent order both return 404. ADMIN reads any order, including legacy unowned records. HTTP routes and service `@PreAuthorize` checks enforce roles. No client `role` or `userId` can override this: unknown JSON fields are rejected.
+
+### Order listing, filtering, and pagination
+
+`GET /api/orders` accepts optional `status`, `from`, `to`, `page`, and `size`. CUSTOMER scope always comes from the authenticated principal; ADMIN can list every owner and legacy orders with `user_id = NULL`. There is no client owner filter. Unrecognized query parameters (including `userId` and `sort`) are ignored and cannot change the server's scope or ordering.
+
+| Parameter | Contract |
+| --- | --- |
+| status | Optional, case-sensitive enum: CREATED, CONFIRMED, SHIPPED, DELIVERED, CANCELLED |
+| from / to | Optional inclusive createdAt bounds in ISO-8601 with `Z` or a numeric offset; encode `+` as `%2B` in a URL. Local dates/times without a timezone are rejected. `from` must not be after `to`. |
+| page | Zero-based integer, default 0; nonnegative |
+| size | Integer 1-100, default 20; `page * size` must not exceed 2147483647 |
+
+Filters combine with AND **before** database pagination. Fixed sorting is `createdAt DESC, id DESC`; the ID breaks timestamp ties. Spring Data JPA Specification includes the ownership condition in both the result and count queries. The fluent DTO projection selects only `id`, `status`, `totalAmount`, `createdAt`; it does not load OrderItem or AppUser entities. This follows the [Spring Data DTO projection approach](https://docs.spring.io/spring-data/jpa/reference/3.5/repositories/projections.html). No schema change/migration is needed. The existing user_id index remains available for customer filtering; large result sets may still require database sorting, and no performance benchmark is claimed.
+
+Success returns the existing `PageResponse` shape. `totalElements` counts only rows matching the caller's scope and filters. No matches or a page beyond the result set returns 200 with empty `content` and the correct totals. Invalid status/date/range/page/size/offset returns 400; no authentication returns 401. `GET /api/orders/{id}` still returns the unchanged detailed `OrderResponse` with items.
+
+```http
+GET /api/orders?status=CREATED&from=2026-11-01T00:00:00Z&to=2026-11-30T23:59:59Z&page=0&size=20
+Authorization: Bearer <CUSTOMER_ACCESS_TOKEN>
+```
+
+Illustrative response for one matching order owned by the caller:
+
+```json
+{"content":[{"id":1,"status":"CREATED","totalAmount":119.80,"createdAt":"2026-11-21T06:01:00Z"}],"page":0,"size":20,"totalElements":1,"totalPages":1,"last":true}
+```
 
 ### Validation, HTTP status, and errors
 
@@ -174,7 +201,7 @@ After changing bootstrap flags/password in `.env`, recreate the API with `docker
 ### Swagger UI and health
 
 - [Swagger UI](http://localhost:8080/swagger-ui/index.html): run register/login, then click **Authorize** and paste only the returned accessToken (Swagger adds Bearer). Use CUSTOMER or ADMIN credentials for the operation's permission.
-- [OpenAPI JSON](http://localhost:8080/v3/api-docs), [YAML](http://localhost:8080/v3/api-docs.yaml): 15 documented business operations with DTOs, errors, and security requirements.
+- [OpenAPI JSON](http://localhost:8080/v3/api-docs), [YAML](http://localhost:8080/v3/api-docs.yaml): 16 documented business operations with DTOs, errors, and security requirements.
 - [Health](http://localhost:8080/actuator/health): status only, 200 UP / 503 DOWN. Other management endpoints are not exposed and security denies their requests (401 without authentication, 403 when authenticated). Environment/configprops/heapdump are not public. JMX endpoints and probes are disabled.
 
 Set API_DOCS_ENABLED=false to disable both Swagger and the spec. Authorization is not persisted by Swagger across reloads. Public endpoints can still return 401 if an invalid bearer token is explicitly supplied. The root `/` is not an API endpoint.
@@ -286,7 +313,7 @@ With Docker running, compile/package and run all PostgreSQL integration tests:
 
 Linux/macOS: `sh mvnw ...`. Surefire runs *Test; Failsafe runs *IT under the integration profile. Testcontainers creates isolated PostgreSQL databases. Test keys/passwords are generated at runtime; no production credentials are used. Unit mocks cannot prove SQL transactions, JWT signature verification, or ownership enforcement across real HTTP requests.
 
-Local verification on **18 November 2026**: `clean verify -Pintegration` completed with **BUILD SUCCESS**, **430 tests passed**, zero failures/errors/skips across 19 classes:
+Pre-feature baseline verification on **18 November 2026**: `clean verify -Pintegration` completed with **BUILD SUCCESS**, **430 tests passed**, zero failures/errors/skips across 19 classes:
 
 | Group | Passed | Evidence |
 | --- | ---: | --- |
@@ -310,3 +337,5 @@ The [CI workflow](.github/workflows/ci.yml) runs verify -Pintegration on push/PR
 - **Transactions/locking:** Order creation, cancellation, restock and movements retain their write transactions and pessimistic product locks. Products are locked in ascending ID order; lifecycle/cancel lock the order first. Idempotency claims precede product locks. Authorization does not replace database concurrency controls.
 - **Migration compatibility:** Keep legacy owners/receipts NULL and ADMIN-only/archived rather than guessing user ownership. New application-created orders always have an owner. Schema nullability is an explicit compatibility limitation, not a claim that raw SQL obeys authorization. Existing API URLs/body shapes remain, with additive response userId; protected endpoints intentionally require authentication now.
 - **Scope:** One application/database, constructor injection, DTO boundaries, explicit Flyway migrations, and targeted indexes. No extra infrastructure is needed for these portfolio features.
+
+Feature verification on 21 November 2026: Maven Wrapper verify -Pintegration completed with BUILD SUCCESS; 469 cases passed (174 unit, 151 MVC, 144 PostgreSQL integration), with zero failures/errors/skips.

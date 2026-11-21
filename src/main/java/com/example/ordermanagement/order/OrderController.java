@@ -1,5 +1,6 @@
 package com.example.ordermanagement.order;
 
+import com.example.ordermanagement.common.PageResponse;
 import io.swagger.v3.oas.annotations.Operation;
 import io.swagger.v3.oas.annotations.Parameter;
 import io.swagger.v3.oas.annotations.headers.Header;
@@ -9,7 +10,11 @@ import io.swagger.v3.oas.annotations.responses.ApiResponses;
 import io.swagger.v3.oas.annotations.tags.Tag;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Positive;
+import jakarta.validation.constraints.Min;
+import jakarta.validation.constraints.Max;
 import java.net.URI;
+import java.time.Instant;
+import org.springframework.format.annotation.DateTimeFormat;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.validation.annotation.Validated;
@@ -18,6 +23,7 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RequestHeader;
 import org.springframework.web.bind.annotation.RestController;
 
@@ -77,6 +83,28 @@ public class OrderController {
         }
         OrderResponse result = orderService.create(request);
         return ResponseEntity.created(URI.create("/api/orders/" + result.id())).body(result);
+    }
+
+    @GetMapping
+    @Operation(summary = "List orders", description = "CUSTOMER sees only its own orders; ADMIN sees all, including legacy orders without an owner. "
+            + "Ownership comes from the principal, never a client userId. Optional filters combine with AND; from/to are inclusive ISO-8601 instants "
+            + "with UTC Z or a numeric offset. from must not be after to. Database pagination uses fixed createdAt DESC, id DESC; "
+            + "page is zero-based, size is 1-100 and page*size must fit a signed int. Summaries omit items; use GET /api/orders/{id} for details.")
+    @ApiResponse(responseCode = "200", description = "Filtered page of order summaries; an empty page is valid", useReturnTypeSchema = true)
+    public PageResponse<OrderSummaryResponse> findAll(
+            @Parameter(description = "Optional exact lifecycle status; case-sensitive")
+            @RequestParam(required = false) OrderStatus status,
+            @Parameter(description = "Inclusive createdAt lower bound; must include a timezone", example = "2026-11-01T00:00:00Z",
+                    schema = @Schema(type = "string", format = "date-time"))
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant from,
+            @Parameter(description = "Inclusive createdAt upper bound; must include a timezone", example = "2026-11-30T23:59:59Z",
+                    schema = @Schema(type = "string", format = "date-time"))
+            @RequestParam(required = false) @DateTimeFormat(iso = DateTimeFormat.ISO.DATE_TIME) Instant to,
+            @Parameter(description = "Zero-based page number")
+            @RequestParam(defaultValue = "0") @Min(0) int page,
+            @Parameter(description = "Page size from 1 to 100")
+            @RequestParam(defaultValue = "20") @Min(1) @Max(100) int size) {
+        return orderService.findAll(new OrderListQuery(status, from, to, page, size));
     }
 
     @GetMapping("/{id}")

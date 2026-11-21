@@ -1,6 +1,7 @@
 package com.example.ordermanagement.order;
 
 import com.example.ordermanagement.common.ResourceNotFoundException;
+import com.example.ordermanagement.common.PageResponse;
 import com.example.ordermanagement.inventory.StockMovement;
 import com.example.ordermanagement.inventory.StockMovementRepository;
 import com.example.ordermanagement.product.Product;
@@ -39,7 +40,10 @@ public class OrderService {
         // Every inventory operation locks products in ascending id order to avoid
         // opposite lock acquisition when two orders contain the same products.
         Map<Long, Product> products = lockProducts(quantities);
-        quantities.forEach((id, quantity) -> products.get(id).ensureStockAvailable(quantity));
+        quantities.forEach((id, quantity) -> {
+            Product product = products.get(id);
+            product.ensureStockAvailable(quantity);
+        });
 
         CustomerOrder order = CustomerOrder.create(users.getReferenceById(currentUser.id()));
         Map<Long, Integer> stockBefore = new TreeMap<>();
@@ -53,6 +57,12 @@ public class OrderService {
         quantities.forEach((id, quantity) -> stockMovementRepository.save(
                 StockMovement.deduction(products.get(id), saved, quantity, stockBefore.get(id))));
         return OrderResponse.from(saved);
+    }
+
+    public PageResponse<OrderSummaryResponse> findAll(OrderListQuery search) {
+        Long ownerId = currentUser.isAdmin() ? null : currentUser.id();
+        return PageResponse.from(orderRepository.findBy(OrderSpecifications.matching(search, ownerId),
+                query -> query.as(OrderSummaryResponse.class).page(search.pageable())));
     }
 
     public OrderResponse getById(Long id) {
