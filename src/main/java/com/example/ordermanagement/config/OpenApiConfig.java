@@ -46,8 +46,9 @@ public class OpenApiConfig {
                                         "message", "must be greater than 0"))))
                         .addResponses("NotFound", error("The requested product or order does not exist", 404,
                                 "Order with id 999 was not found", List.of()))
-                        .addResponses("Conflict", error("Business rule, inventory, idempotency, or lock conflict; "
-                                        + "retry lock conflicts using the same key and payload", 409,
+                        .addResponses("Conflict", error("Business rule, inventory, idempotency, or lock conflict. "
+                                        + "For keyed order creation retries, reuse the same key and payload. "
+                                        + "Restock and adjustment are not idempotent; do not blindly retry an uncertain success.", 409,
                                 "Resource is busy; retry the request", List.of()))
                         .addResponses("InternalError", error("Unexpected failure; internal details are not returned", 500,
                                 "An unexpected error occurred", List.of())));

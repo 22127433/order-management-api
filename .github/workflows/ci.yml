@@ -18,5 +18,7 @@ jobs:
           distribution: temurin
           java-version: '21'
           cache: maven
-      - name: Unit, security, HTTP, PostgreSQL, OpenAPI, and health tests
-        run: sh mvnw -B -ntp verify -Pintegration
+      - name: Check Docker availability for PostgreSQL Testcontainers
+        run: docker info > /dev/null
+      - name: Unit, MVC, security, PostgreSQL, OpenAPI, clean install and V1-V6 upgrades
+        run: ./mvnw -B -ntp verify -Pintegration

@@ -254,6 +254,64 @@ class ApiDocumentationIT extends com.example.ordermanagement.support.JwtTestProp
                 .contains("manual restock", "manual adjustment");
     }
 
+    @Test
+    void everyEndpointDocumentsItsPermissionSuccessStatusAndActualRequestResponseDtos() {
+        JsonNode spec = specification();
+        // method, path, success, request DTO (or -), response DTO (or -), role, paged
+        String contracts = """
+                post /api/auth/register 201 RegisterRequest UserResponse PUBLIC false
+                post /api/auth/login 200 LoginRequest TokenResponse PUBLIC false
+                post /api/products 201 ProductRequest ProductResponse ADMIN false
+                get /api/products 200 - ProductResponse PUBLIC true
+                get /api/products/{id} 200 - ProductResponse PUBLIC false
+                put /api/products/{id} 200 UpdateProductRequest ProductResponse ADMIN false
+                delete /api/products/{id} 204 - - ADMIN false
+                patch /api/products/{id}/availability 200 ProductAvailabilityRequest ProductResponse ADMIN false
+                get /api/admin/products 200 - ProductResponse ADMIN true
+                post /api/products/{id}/restock 200 RestockRequest ProductResponse ADMIN false
+                post /api/products/{id}/adjust-stock 200 AdjustStockRequest ProductResponse ADMIN false
+                get /api/products/{id}/stock-movements 200 - StockMovementResponse ADMIN true
+                post /api/orders 201 CreateOrderRequest OrderResponse CUSTOMER false
+                get /api/orders 200 - OrderSummaryResponse CUSTOMER true
+                get /api/orders/{id} 200 - OrderResponse CUSTOMER false
+                post /api/orders/{id}/confirm 200 - OrderResponse ADMIN false
+                post /api/orders/{id}/ship 200 - OrderResponse ADMIN false
+                post /api/orders/{id}/deliver 200 - OrderResponse ADMIN false
+                post /api/orders/{id}/cancel 200 - OrderResponse ADMIN false
+                """;
+        for (String line : contracts.strip().split("\\R")) {
+            String[] contract = line.strip().split(" ");
+            JsonNode operation = spec.path("paths").path(contract[1]).path(contract[0]);
+            boolean publicRoute = contract[5].equals("PUBLIC");
+            if (publicRoute) {
+                assertThat(operation.has("security")).as(line).isTrue();
+                assertThat(operation.path("security").isEmpty()).as(line).isTrue();
+            } else {
+                assertThat(operation.has("security")).as(line).isFalse(); // Inherit global bearerAuth.
+                assertThat(operation.path("description").asText()).as(line).contains(contract[5]);
+                assertThat(operation.path("responses").has("401")).as(line).isTrue();
+                assertThat(operation.path("responses").has("403")).as(line).isTrue();
+            }
+            if (!contract[3].equals("-")) {
+                assertThat(operation.at("/requestBody/content/application~1json/schema/$ref").asText()).as(line)
+                        .isEqualTo("#/components/schemas/" + contract[3]);
+            } else {
+                assertThat(operation.has("requestBody")).as(line).isFalse();
+            }
+            JsonNode response = operation.path("responses").path(contract[2]);
+            assertThat(response.isMissingNode()).as(line).isFalse();
+            if (contract[4].equals("-")) {
+                assertThat(response.has("content")).as(line).isFalse();
+            } else {
+                JsonNode schema = response.at("/content/application~1json/schema");
+                if (Boolean.parseBoolean(contract[6])) {
+                    schema = spec.at(schema.path("$ref").asText().substring(1)).at("/properties/content/items");
+                }
+                assertThat(schema.path("$ref").asText()).as(line).isEqualTo("#/components/schemas/" + contract[4]);
+            }
+        }
+    }
+
     private JsonNode specification() {
         var response = http.getForEntity("/v3/api-docs", JsonNode.class);
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);

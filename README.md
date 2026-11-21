@@ -10,7 +10,19 @@ Customers register, log in, browse products, and create/read their own orders. A
 
 Prices are read from the database and snapshotted when ordering. Order/items, stock changes, inventory movements, and any idempotency receipt commit or roll back together. The project remains one Spring Boot application and one PostgreSQL database. There is no frontend application, payment/carrier integration, microservice, Redis, Kafka, refresh-token flow, or user/role administration API.
 
-[Swagger UI](http://localhost:8080/swagger-ui/index.html) is available after startup. [INTERVIEW_PREP.md](INTERVIEW_PREP.md) explains the source in Vietnamese. [REVIEW.md](REVIEW.md) records an earlier review; its old test counts and unauthenticated API behavior are historical.
+[Swagger UI](http://localhost:8080/swagger-ui/index.html) is available after startup. [FINAL_REVIEW.md](FINAL_REVIEW.md) records the current verification and risks; [INTERVIEW_PREP.md](INTERVIEW_PREP.md) explains the source in Vietnamese. [REVIEW.md](REVIEW.md) is historical and predates the current security/API contract.
+
+### Core business rules
+
+| Area | Rule |
+| --- | --- |
+| Identity | Registration always creates CUSTOMER. Order owner comes from the authenticated principal, never a request userId. |
+| Lifecycle | CREATED -> CONFIRMED -> SHIPPED -> DELIVERED, or CREATED -> CANCELLED. Only ADMIN performs transitions; repeated/invalid transitions return 409. |
+| Inventory | Creation deducts stock once. Only a successful cancellation from CREATED restores it. Fulfillment never deducts again. Stock and movements share a transaction. |
+| Pricing | Prices come from locked products and use BigDecimal. Existing order unit prices, subtotals and totals remain snapshots. |
+| Availability | Inactive products are hidden from public reads and rejected after locking during new purchases. Existing orders/history remain accessible under their usual permissions. |
+| Retries | Order Idempotency-Key is optional, durable and scoped to the user. Successful replays return the original creation snapshot; restock/adjustment have no deduplication. |
+| Product editing | PUT replaces metadata only. Stock changes use restock or signed adjustment; sale status uses availability PATCH. DELETE refuses referenced history. |
 
 ## Tech Stack
 
@@ -33,10 +45,11 @@ Spring Boot manages security/Nimbus dependency versions in [pom.xml](pom.xml). s
 ## Features
 
 - Product CRUD with protected writes; case-insensitive name search, inclusive price filtering, stock filtering, sorting, and database pagination.
+- Active-only public catalog, ADMIN availability changes, and a protected ADMIN catalog for inactive products; stock and history are retained.
 - Multi-product ordering, BigDecimal totals, original price snapshots, and stock checks under ascending product-ID write locks.
 - CREATED -> CONFIRMED -> SHIPPED -> DELIVERED, or CREATED -> CANCELLED; repeated/invalid transitions return 409.
 - Deduct stock at creation only; cancel restores stock once. Fulfillment does not deduct stock again.
-- Manual restock and paginated inventory history with initial/deduction/cancellation/restock movements.
+- Manual restock, signed stock adjustments, and paginated inventory history with opening/order/manual movements.
 - Optional persistent Idempotency-Key scoped to the authenticated user, including concurrent retries and rollback recovery.
 - CUSTOMER registration, BCrypt password hashes, short-lived JWT login, role authorization, and database ownership checks.
 - Explicit operator-only admin bootstrap, structured errors, DTO-only responses, Swagger documentation, and an opt-in local demo.
@@ -74,7 +87,7 @@ erDiagram
 | Table | Key fields and constraints |
 | --- | --- |
 | `app_users` | Identity ID, unique normalized email, 60-character BCrypt hash, CUSTOMER/ADMIN role, created_at |
-| `products` | Name/description, NUMERIC(19,2) price, nonnegative INTEGER stock |
+| `products` | Name/description, NUMERIC(19,2) price, nonnegative INTEGER stock, NOT NULL active BOOLEAN DEFAULT TRUE |
 | `customer_orders` | Status CHECK, NUMERIC(25,2) total, created_at, nullable legacy user_id FK |
 | `order_items` | Order/product FKs, positive quantity, price/subtotal snapshots; unique (order_id, product_id) |
 | `stock_movements` | Signed delta, stock before/after, type, optional order/reason, timestamp; balance/type CHECKs |
@@ -88,7 +101,7 @@ Migration [V7](src/main/resources/db/migration/V7__product_availability.sql) add
 
 Migration [V8](src/main/resources/db/migration/V8__manual_stock_adjustments.sql) extends only `ck_stock_movement_type` to accept MANUAL_ADJUSTMENT. V1-V7 and existing journal rows remain unchanged. The existing balance CHECK uses BIGINT arithmetic; nonnegative stock CHECKs, INTEGER storage bounds, foreign keys and history indexes remain in force. No new index is needed: adjustments use the existing product primary-key lock and product/time history index.
 
-User/order foreign keys use RESTRICT, with no cascade deletion of users/history. A user_id index supports order FK checks; the scoped key index also covers receipt user FK lookups. Stock history uses `(product_id, created_at DESC, id DESC)`. The price/ID index supports selective price pages. No plain name index is claimed to accelerate `%keyword%`; pg_trgm is not installed. See [ProductSearchIT](src/test/java/com/example/ordermanagement/integration/ProductSearchIT.java) for generated SQL and measured query plans, not a throughput benchmark.
+User ownership, receipt-order and movement-reference foreign keys use RESTRICT. Order items use ON DELETE CASCADE for their parent order; there is no order-deletion API, and journal/receipt references protect recorded orders. A user_id index supports order FK checks; the scoped key index also covers receipt user FK lookups. Stock history uses `(product_id, created_at DESC, id DESC)`. The price/ID index supports selective price pages. No plain name index is claimed to accelerate `%keyword%`; pg_trgm is not installed. See [ProductSearchIT](src/test/java/com/example/ordermanagement/integration/ProductSearchIT.java) for generated SQL and measured query plans, not a throughput benchmark.
 
 ## API Endpoints
 
@@ -130,15 +143,15 @@ Content-Type: application/json
 {"name":"Mechanical Keyboard","description":"Updated USB keyboard","price":64.90}
 ```
 
-200 returns the complete `ProductResponse`, including the current `stockQuantity` and `active` flag. Both are preserved by PUT. This intentionally replaces the old contract: **remove stockQuantity from PUT bodies**. Sending it now returns **400**, even if equal to current stock, under the existing `fail-on-unknown-properties=true` rule. `active` is also rejected; use availability PATCH. Use restock for stock additions. POST still requires stockQuantity and creates INITIAL_STOCK.
+200 returns the complete `ProductResponse`, including the current `stockQuantity` and `active` flag. Both are preserved by PUT. This intentionally replaces the old contract: **remove stockQuantity from PUT bodies**. Sending it now returns **400**, even if equal to current stock, under the existing `fail-on-unknown-properties=true` rule. `active` is also rejected; use availability PATCH. Use restock for stock additions or adjust-stock for signed corrections. POST still requires stockQuantity and creates INITIAL_STOCK.
 
 ProductService retains its write transaction, ADMIN method authorization, and product-row pessimistic lock. The entity constructor and `updateMetadata` share metadata validation; only the constructor sets initial stock. A metadata edit never writes a client stock value or creates an inventory movement. If an Order/restock changes inventory before a waiting PUT obtains the lock, PUT preserves that latest quantity. Orders that already exist retain their original unit-price/subtotal/total snapshots. Concurrent stale metadata edits still follow the existing last-writer behavior; this refactor does not add ETag/version preconditions. No schema migration or new framework is needed.
 
 ### Product availability
 
-Public `GET /api/products` always filters `active=true` **before** pagination and count. Public `GET /api/products/{id}` returns 404 for inactive products, including when called by ADMIN. Adding `active=false` to a public URL cannot expose them. `ProductResponse` includes `active` in create/update/restock/availability responses and both catalog views.
+Public `GET /api/products` always filters `active=true` **before** pagination and count. Public `GET /api/products/{id}` returns 404 for inactive products, including when called by ADMIN. Adding `active=false` to a public URL cannot expose them. `ProductResponse` includes `active` in create/update/restock/adjustment/availability responses and both catalog views.
 
-ADMIN uses `GET /api/admin/products?active=false` to find inactive products. `active=true` selects active products; omitted selects both. The same keyword/minPrice/maxPrice/inStock/page/size/sort rules apply as the public catalog. Both SecurityConfig and service method security require ADMIN. CUSTOMER receives 403, anonymous callers 401. ADMIN can use PUT, restock, inventory history and availability endpoints with an inactive product ID; metadata updates/restock do not automatically reactivate it.
+ADMIN uses `GET /api/admin/products?active=false` to find inactive products. `active=true` selects active products; omitted selects both. The same keyword/minPrice/maxPrice/inStock/page/size/sort rules apply as the public catalog. Both SecurityConfig and service method security require ADMIN. CUSTOMER receives 403, anonymous callers 401. ADMIN can use PUT, restock, adjustment, inventory history and availability endpoints with an inactive product ID; metadata updates/restock/adjustment do not automatically reactivate it.
 
 ```http
 PATCH /api/products/1/availability
@@ -204,7 +217,7 @@ Errors use ApiError: `timestamp`, `status`, `error`, `message`, `path`, `fieldEr
 
 Optional `Idempotency-Key`: 1-128 case-sensitive ASCII letters/digits or `.`, `_`, `:`, `-`, exactly one value without spaces. Scope is the authenticated user. Without it, each successful request creates a new order. New key: 201 + Location + `Idempotency-Replayed: false`. Same user/key/equivalent payload: 200 + Location + `Idempotency-Replayed: true`, returning the original creation snapshot without another stock/journal write. A different valid payload for that user/key returns 409. Different users may reuse the same key independently.
 
-Payload identity is the sorted set of `(productId,quantity)` pairs; JSON whitespace, property ordering, and item ordering are insignificant. Duplicates still return 400. Replays keep original prices and CREATED status even after cancellation/fulfillment; GET returns current state. Keys are retained indefinitely; deletion/expiry is not implemented. Restock does not support keys.
+Payload identity is the sorted set of `(productId,quantity)` pairs; JSON whitespace, property ordering, and item ordering are insignificant. Duplicates still return 400. Replays keep original prices and CREATED status even after cancellation/fulfillment; GET returns current state. Keys are retained indefinitely; deletion/expiry is not implemented. Restock and stock adjustment do not support keys.
 
 The coordinator claims `(user_id,key)` with `INSERT ... ON CONFLICT DO NOTHING` before product locks in READ COMMITTED. A competing insert waits for commit/rollback; a separate SELECT statement obtains the newly committed receipt. Rollback lets a waiting request claim and create. OrderService joins the coordinator's REQUIRED transaction; JDBC and Hibernate share it. A deferred database trigger rejects incomplete reservations at commit. Failures are not cached; a five-second lock timeout returns retryable 409 (Spring's PostgreSQL SQLSTATE translator handles 55P03). An indefinitely stalled live owner still needs database timeout/operator intervention; no lease takeover is implemented. These guarantees apply to retained receipts in this database, not exactly-once in all conditions. See [PostgreSQL unique checks](https://www.postgresql.org/docs/17/index-unique-checks.html) and [READ COMMITTED](https://www.postgresql.org/docs/17/transaction-iso.html).
 
@@ -275,7 +288,7 @@ After changing bootstrap flags/password in `.env`, recreate the API with `docker
 ### Swagger UI and health
 
 - [Swagger UI](http://localhost:8080/swagger-ui/index.html): run register/login, then click **Authorize** and paste only the returned accessToken (Swagger adds Bearer). Use CUSTOMER or ADMIN credentials for the operation's permission.
-- [OpenAPI JSON](http://localhost:8080/v3/api-docs), [YAML](http://localhost:8080/v3/api-docs.yaml): 19 documented business operations with DTOs, errors, and security requirements.
+- [OpenAPI JSON](http://localhost:8080/v3/api-docs), [YAML](http://localhost:8080/v3/api-docs.yaml): 19 documented business operations on 15 paths, with DTOs, errors, and security requirements.
 - [Health](http://localhost:8080/actuator/health): status only, 200 UP / 503 DOWN. Other management endpoints are not exposed and security denies their requests (401 without authentication, 403 when authenticated). Environment/configprops/heapdump are not public. JMX endpoints and probes are disabled.
 
 Set API_DOCS_ENABLED=false to disable both Swagger and the spec. Authorization is not persisted by Swagger across reloads. Public endpoints can still return 401 if an invalid bearer token is explicitly supplied. The root `/` is not an API endpoint.
@@ -288,7 +301,18 @@ With the API running, open another PowerShell terminal:
 .\scripts\demo.ps1
 ```
 
-It prompts for the local ADMIN credential, logs in, registers a fresh CUSTOMER, and uses that customer for ordering/retries. ADMIN performs catalog, inventory, and lifecycle actions. It accepts loopback HTTP(S) URLs only; use `-BaseUrl http://localhost:8081` for a different port. It does not print passwords or JWTs. Each run intentionally adds one CUSTOMER, two products, and two orders; final keyboard stock is 24 with five movements. IDs and the non-secret idempotency key are printed for inspection as ADMIN in Swagger. These records remain; no startup product/order seed or automatic history deletion occurs.
+It prompts for the local ADMIN credential, logs in, registers a fresh CUSTOMER, and uses that customer for ordering/retries. ADMIN performs catalog, inventory, and lifecycle actions. It accepts loopback HTTP(S) URLs only; use `-BaseUrl http://localhost:8081` for a different port. It does not print passwords or JWTs. Each run intentionally adds one CUSTOMER, two uniquely named products, and two orders. IDs and the non-secret idempotency key are printed for inspection as ADMIN in Swagger. These records remain; no startup product/order seed or automatic history deletion occurs.
+
+The script checks this sequence using actual returned IDs and HTTP statuses:
+
+1. Register/login -> create keyboard (20 units) and mouse (10) -> case-insensitive search with price/stock filters and pagination -> metadata-only PUT.
+2. Create a two-product order (139.79), retry the same key (200, same order), reject a different payload (409), and verify keyboard stock 18. CUSTOMER sees only its order summary; anonymous listing returns 401.
+3. ADMIN confirms, ships and delivers **that same keyed order**, checking stock stays 18 at each step. CUSTOMER cannot confirm; cancellation/repeated delivery of the delivered order return 409.
+4. Deactivate twice; public detail returns 404 and search hides it. ADMIN still lists it. New purchases return 409; the existing order remains readable and the committed key still replays its original CREATED snapshot.
+5. While inactive, adjust -3 (damaged), restock +5, adjust +2 (count correction): stock becomes 22 without reactivating. Reactivate; retry the earlier rejected key successfully, then cancel that second order once. CUSTOMER order pagination returns two summaries.
+6. Read stock history, validate the full before/delta/after chain and rejection cases. Final keyboard stock is **22**, active=true, with **7 movements**: `+20, -2, -3, +5, +2, -1, +1`.
+
+For manual requests, use the presentation route at the top of [requests.http](requests.http). Its numbered examples are an extended regression collection with their own stock assumptions; they are not the same sequence as the automated demo. The fulfillment request includes a key and an adjacent named retry before confirm/ship/deliver.
 
 ### Configuration
 
@@ -334,7 +358,7 @@ Content-Type: application/json
 {"name":"Keyboard","description":"USB","price":59.90,"stockQuantity":20}
 ```
 
-201 + Location returns `{ "id":1,"name":"Keyboard","description":"USB","price":59.90,"stockQuantity":20 }`.
+201 + Location returns `{ "id":1,"name":"Keyboard","description":"USB","price":59.90,"stockQuantity":20,"active":true }`.
 
 List Products (public):
 
@@ -373,33 +397,49 @@ Insufficient Stock Error: with 18 keyboards remaining, quantity=21 returns 409 w
 
 ## Testing
 
-No database, Docker, .env, or production signing secret is required for unit/MVC tests:
+Run from the repository root on Windows:
 
 ```powershell
 .\mvnw.cmd test
+.\mvnw.cmd verify -Pintegration
 ```
 
-With Docker running, compile/package and run all PostgreSQL integration tests:
+Linux/macOS:
 
-```powershell
-.\mvnw.cmd clean verify -Pintegration
+```sh
+./mvnw test
+./mvnw verify -Pintegration
 ```
 
-Linux/macOS: `sh mvnw ...`. Surefire runs *Test; Failsafe runs *IT under the integration profile. Testcontainers creates isolated PostgreSQL databases. Test keys/passwords are generated at runtime; no production credentials are used. Unit mocks cannot prove SQL transactions, JWT signature verification, or ownership enforcement across real HTTP requests.
+The first command runs unit/MVC tests without Docker, a database, .env or production secrets. The integration profile also runs real PostgreSQL Testcontainers; Docker must be available. Test credentials/signing keys are generated at runtime. Surefire discovers *Test, Failsafe discovers *IT. `verify` includes the unit/MVC suite again; those repeated executions are not added twice to the totals below.
 
-Pre-feature baseline verification on **18 November 2026**: `clean verify -Pintegration` completed with **BUILD SUCCESS**, **430 tests passed**, zero failures/errors/skips across 19 classes:
+Local final verification on **21 November 2026**, Windows / Java 21 / Maven Wrapper 3.9.11: both commands completed with **BUILD SUCCESS**. The standalone `test` ran **411** cases. The `verify -Pintegration` run passed **593** cases across **27** classes, with **zero failures, errors or skipped tests**:
 
 | Group | Passed | Evidence |
 | --- | ---: | --- |
-| Unit | 164 | Mockito service/domain tests and real Nimbus encoder/decoder tests; no database |
-| MVC slice | 133 | MockMvc with security filters; business services/repositories mocked |
-| PostgreSQL integration | 133 | Testcontainers, real transactions/locks, and HTTP authentication/ownership tests |
+| Unit | 212 | Domain/Mockito service tests and real Nimbus JWT validator tests; no database |
+| MVC slice | 199 | HTTP binding, validation, error shape and security filters; business services/repositories mocked |
+| PostgreSQL integration | 182 | Real JPA/JDBC transactions, SQL constraints, ownership, HTTP authentication, migrations and controlled lock races |
 
-XML reports are in target/surefire-reports and target/failsafe-reports (excluded from Git). A separate Docker smoke check built the API, bootstrapped an operator-supplied ADMIN, ran the authenticated CUSTOMER/ADMIN demo (stock 24, five movements), rendered 15 Swagger operations with Authorize in headless Chrome, and verified login plus an existing token after restart with bootstrap disabled/password removed. PostgreSQL-only Compose also ran without JWT settings. Smoke checks are not included in the JUnit count.
+XML reports are generated in `target/surefire-reports` and `target/failsafe-reports` and excluded from Git. [FINAL_REVIEW.md](FINAL_REVIEW.md) records the review scope and remaining risks. Counts include parameterized cases; they are not coverage percentages or performance results.
 
-Security tests cover DTO validation, BCrypt byte limits/salts, JWT claims/signature/algorithm, 401/403, forbidden registration role, owner spoofing, other-user access, ADMIN operations, method security, per-user idempotency, concurrent registration/creation, stale/deleted identities, and V5-to-V6 data preservation. Existing stock, lifecycle, rollback, price, pagination, and key-lock tests remain enabled with explicit test identities. Controlled concurrency tests observe actual PostgreSQL lock waits; they are not exhaustive stress tests.
+| Verification area | Main integration evidence |
+| --- | --- |
+| JWT, BCrypt, permissions, ownership, scoped keys | [AuthenticationAuthorizationIT](src/test/java/com/example/ordermanagement/integration/AuthenticationAuthorizationIT.java) |
+| Order lifecycle, stock restoration, price snapshots, metadata/order locking | [OrderManagementIT](src/test/java/com/example/ordermanagement/integration/OrderManagementIT.java) |
+| Durable replay, payload mismatch, competing claims, rollback/retry | [OrderIdempotencyIT](src/test/java/com/example/ordermanagement/integration/OrderIdempotencyIT.java) |
+| Search SQL/price index, database pagination and literal keyword handling | [ProductSearchIT](src/test/java/com/example/ordermanagement/integration/ProductSearchIT.java) |
+| Inactive public visibility, ADMIN catalog, deactivation/order races | [ProductAvailabilityIT](src/test/java/com/example/ordermanagement/integration/ProductAvailabilityIT.java) |
+| CUSTOMER scope, ADMIN legacy orders, summary projection without item queries | [OrderListingIT](src/test/java/com/example/ordermanagement/integration/OrderListingIT.java) |
+| Restock/adjustment, history, overflow, SQL failure rollback, inventory races | [InventoryManagementIT](src/test/java/com/example/ordermanagement/integration/InventoryManagementIT.java) |
+| Empty database and each V1-V6 baseline upgraded to V8 with existing data | [MigrationCompatibilityIT](src/test/java/com/example/ordermanagement/integration/MigrationCompatibilityIT.java) |
+| All 19 operations: DTOs, permissions in documentation, success/error statuses, Swagger HTTP assets | [ApiDocumentationIT](src/test/java/com/example/ordermanagement/integration/ApiDocumentationIT.java) |
 
-The [CI workflow](.github/workflows/ci.yml) runs verify -Pintegration on push/PR with a 20-minute timeout. Local results do not imply CI success; inspect GitHub Actions separately. No production throughput/coverage benchmark is claimed.
+Rollback tests deliberately fail SQL writes and inspect persisted state after the transaction ends. Controlled concurrency tests observe PostgreSQL `pg_stat_activity.wait_event_type = 'Lock'` before releasing the first transaction. Mockito tests do not prove either behavior; these races do not exhaust all possible schedules.
+
+The [GitHub Actions workflow](.github/workflows/ci.yml) checks Docker, then runs `./mvnw -B -ntp verify -Pintegration` on push/PR with Java 21 and a 20-minute timeout. This includes unit/MVC tests, fresh migration, V1-V6 upgrades and all PostgreSQL integration tests. The Unix wrapper is versioned executable with LF endings. This review ran locally on Windows; a GitHub Actions run is not claimed here.
+
+Docker Compose smoke verification on **21 November 2026** also built the API with the current Dockerfile and ran `scripts/demo.ps1` twice: first on a fresh database, then on the populated database. Both runs completed with stock 22 and seven movements per new keyboard. Headless Chrome rendered all 19 Swagger operations with Authorize. PostgreSQL-only Compose worked without JWT configuration; login and an existing token still worked after recreating the API with bootstrap disabled and its password removed. The isolated verification stack/volume and temporary credentials were cleaned up. These smoke checks are additional to the JUnit count.
 
 ## Design Decisions
 
@@ -408,8 +448,15 @@ The [CI workflow](.github/workflows/ci.yml) runs verify -Pintegration on push/PR
 - **Identity freshness:** Each JWT request rechecks the database account and role. Deleted accounts or changed roles invalidate old tokens. No HTTP session, refresh token, logout endpoint, individual token denylist, password reset, or role-change API is implemented. Access tokens otherwise remain usable until expiry; production deployment would need HTTPS and an appropriate abuse/rate-limit policy.
 - **Authorization:** Request matchers and method security check roles; repository ownership predicates protect Order reads. A role alone is not ownership. ADMIN-only cancellation preserves existing lifecycle/stock rules. User IDs/roles cannot be assigned through registration/order request DTOs.
 - **CSRF/CORS:** CSRF is disabled because authentication uses explicit bearer headers with no cookie/basic/form session. This choice must be revisited if cookie authentication is introduced. No permissive cross-origin policy is added.
-- **Transactions/locking:** Order creation, cancellation, restock and movements retain their write transactions and pessimistic product locks. Products are locked in ascending ID order; lifecycle/cancel lock the order first. Idempotency claims precede product locks. Authorization does not replace database concurrency controls.
-- **Migration compatibility:** Keep legacy owners/receipts NULL and ADMIN-only/archived rather than guessing user ownership. New application-created orders always have an owner. Schema nullability is an explicit compatibility limitation, not a claim that raw SQL obeys authorization. Existing API URLs/body shapes remain, with additive response userId; protected endpoints intentionally require authentication now.
+- **Transactions/locking:** Order creation, cancellation, restock, signed adjustment and movements retain their write transactions and pessimistic product locks. Products are locked in ascending ID order; lifecycle/cancel lock the order first. Adjustment locks one product, checks bounds using long arithmetic, and writes its movement in the same transaction. Idempotency claims precede product locks. Authorization does not replace database concurrency controls.
+- **Migration compatibility:** Keep legacy owners/receipts NULL and ADMIN-only/archived rather than guessing user ownership. New application-created orders always have an owner. Schema nullability is an explicit compatibility limitation, not a claim that raw SQL obeys authorization. Core order URLs/payloads remain; protected endpoints require authentication, and metadata PUT intentionally excludes the former stockQuantity field.
 - **Scope:** One application/database, constructor injection, DTO boundaries, explicit Flyway migrations, and targeted indexes. No extra infrastructure is needed for these portfolio features.
 
-Feature verification on 21 November 2026: Maven Wrapper verify -Pintegration completed with BUILD SUCCESS; 585 cases passed (212 unit, 199 MVC, 174 PostgreSQL integration), with zero failures/errors/skips.
+## Current Limitations and Technical Risks
+
+- **Authentication operations:** No refresh tokens, individual token revocation/logout, password reset, rate limiting, or user/role administration. HS256 uses one environment-provided key; replacing it invalidates all tokens. Production hosting would need HTTPS and secret lifecycle management. Duplicate-email registration intentionally returns 409.
+- **Retry retention:** Order receipts have no expiry/cleanup. Restock and adjustment are not idempotent; an uncertain successful response must be reconciled before retry. A live stalled transaction has no application lease takeover; the five-second lock timeout limits waiters, not total transaction duration.
+- **Stock reservations:** CREATED orders hold deducted stock until an ADMIN fulfills/cancels them; there is no automatic expiry. If inventory has since been increased to capacity, cancellation can return 409 for overflow and leave order/stock/history unchanged.
+- **Audit scope:** No history backfill for legacy stock; movements have no actor-user field, and availability changes have no audit history. Immutability is enforced through application mapping/API, not against direct database administrators. Legacy orders/receipts retain nullable ownership as documented.
+- **Concurrency and scale:** Metadata edits use the product lock but have no @Version/ETag to detect stale edit intent. Page size/offset bounds do not make large offsets cheap. Name substring search has no trigram index; order filters may need composite indexes after representative EXPLAIN measurements. Controlled lock-race tests are not exhaustive stress tests or throughput benchmarks.
+- **Business scope:** No payment, currency conversion, tax/discount calculation, carrier integration, frontend, or distributed transaction. Monetary values use a single implicit currency; production currency rules are not modeled.

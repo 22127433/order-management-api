@@ -3,6 +3,10 @@
 # CUSTOMER creates/reads its own orders. ADMIN performs catalog/inventory/lifecycle actions.
 # Named responses supply real IDs, including when the database already has data.
 # Create requests add records each time they are sent. Change baseUrl if needed.
+# Guided presentation: auth -> 01-13 -> 19/21 -> 33 + the named fulfillment retry -> 35 -> 38 -> 39 -> 42.
+# Then 68/69 for order listing, 46/47 for history, 80-89 for deactivation, 96/97/98 for signed adjustments,
+# and 90/91 to reactivate. Request 33 starts at stock 20 when run after cancellation 11; other paths may have different stock.
+# scripts/demo.ps1 is the fully automated, isolated-per-run version with assertions and actual returned IDs.
 # Documentation: https://github.com/Huachao/vscode-restclient#request-variables
 @baseUrl = http://localhost:8080
 @adminToken = {{loginAdmin.response.body.$.accessToken}}
@@ -222,10 +226,20 @@ GET {{baseUrl}}/api/products?minPrice=abc
 POST {{baseUrl}}/api/orders
 Authorization: Bearer {{customerToken}}
 Content-Type: application/json
+Idempotency-Key: portfolio-fulfillment-{{keyboardId}}
 
 {
   "items": [{ "productId": {{keyboardId}}, "quantity": 1 }]
 }
+
+### Retry the fulfillment creation before advancing its lifecycle -> 200, same ID, no extra stock deduction
+# @name retryFulfillmentOrder
+POST {{baseUrl}}/api/orders
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+Idempotency-Key: portfolio-fulfillment-{{keyboardId}}
+
+{"items":[{"productId":{{keyboardId}},"quantity":1}]}
 
 ### 34. Ship Before Confirmation -> 409; remains CREATED, stock 19
 POST {{baseUrl}}/api/orders/{{fulfillmentOrderId}}/ship
