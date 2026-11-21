@@ -2,6 +2,7 @@ package com.example.ordermanagement.product;
 
 import com.example.ordermanagement.common.PageResponse;
 import com.example.ordermanagement.inventory.RestockRequest;
+import com.example.ordermanagement.inventory.AdjustStockRequest;
 import com.example.ordermanagement.inventory.StockMovementQuery;
 import com.example.ordermanagement.inventory.StockMovementResponse;
 import io.swagger.v3.oas.annotations.Operation;
@@ -107,7 +108,7 @@ public class ProductController {
     @PutMapping("/{id}")
     @Operation(tags = "Products", summary = "Replace product metadata", description = "ADMIN only. Accepts name, description and price only. "
             + "stockQuantity and active are unknown fields and return 400, even if unchanged. Locks the product; stock and availability are preserved. "
-            + "Use restock to add inventory, availability PATCH to change sale status. Existing order price snapshots are preserved.")
+            + "Use restock to add inventory, adjust-stock for signed corrections, and availability PATCH to change sale status. Existing order price snapshots are preserved.")
     @ApiResponse(responseCode = "200", description = "Updated product", useReturnTypeSchema = true)
     @ApiResponse(responseCode = "404", ref = "#/components/responses/NotFound")
     @ApiResponse(responseCode = "409", ref = "#/components/responses/Conflict")
@@ -124,6 +125,19 @@ public class ProductController {
     @ApiResponse(responseCode = "409", ref = "#/components/responses/Conflict")
     public ProductResponse restock(@PathVariable @Positive Long id, @Valid @RequestBody RestockRequest request) {
         return productService.restock(id, request);
+    }
+
+    @PostMapping("/{id}/adjust-stock")
+    @Operation(tags = "Inventory", summary = "Adjust product stock", description = "ADMIN only. Applies a signed, nonzero delta and records MANUAL_ADJUSTMENT "
+            + "with a required reason and no order reference, atomically under a product write lock. "
+            + "Checks the result using long arithmetic before changing stock: negative stock or overflow above 2147483647 returns 409. "
+            + "Works for active and inactive products without changing availability. This endpoint does not support Idempotency-Key; "
+            + "repeating a successful call applies the adjustment again.")
+    @ApiResponse(responseCode = "200", description = "Product with adjusted stock", useReturnTypeSchema = true)
+    @ApiResponse(responseCode = "404", ref = "#/components/responses/NotFound")
+    @ApiResponse(responseCode = "409", ref = "#/components/responses/Conflict")
+    public ProductResponse adjustStock(@PathVariable @Positive Long id, @Valid @RequestBody AdjustStockRequest request) {
+        return productService.adjustStock(id, request);
     }
 
     @GetMapping("/{id}/stock-movements")

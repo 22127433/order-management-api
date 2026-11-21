@@ -9,7 +9,9 @@ import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
 
 import com.example.ordermanagement.common.ConflictException;
+import com.example.ordermanagement.auth.UserRepository;
 import com.example.ordermanagement.inventory.RestockRequest;
+import com.example.ordermanagement.inventory.AdjustStockRequest;
 import com.example.ordermanagement.inventory.StockMovementQuery;
 import com.example.ordermanagement.inventory.StockMovementResponse;
 import com.example.ordermanagement.inventory.StockMovementType;
@@ -20,11 +22,13 @@ import com.example.ordermanagement.order.OrderStatus;
 import com.example.ordermanagement.product.ProductRequest;
 import com.example.ordermanagement.product.ProductResponse;
 import com.example.ordermanagement.product.ProductService;
+import com.example.ordermanagement.product.ProductAvailabilityRequest;
+import com.example.ordermanagement.security.TokenService;
+import com.example.ordermanagement.support.TestSecurity;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.concurrent.Callable;
 import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
 import org.flywaydb.core.Flyway;
@@ -39,9 +43,12 @@ import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.MediaType;
 import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.access.AccessDeniedException;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.authority.SimpleGrantedAuthority;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
-import org.springframework.test.web.servlet.MockMvc;
 import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.support.TransactionTemplate;
 import org.testcontainers.containers.PostgreSQLContainer;
@@ -66,6 +73,8 @@ class InventoryManagementIT extends com.example.ordermanagement.support.Authenti
     @Autowired private OrderService orders;
     @Autowired private JdbcTemplate jdbc;
     @Autowired private PlatformTransactionManager transactionManager;
+    @Autowired private UserRepository users;
+    @Autowired private TokenService tokens;
 
     @BeforeEach
     void cleanDatabase() {
@@ -93,6 +102,152 @@ class InventoryManagementIT extends com.example.ordermanagement.support.Authenti
         assertThatThrownBy(() -> orders.cancel(order.id())).isInstanceOf(ConflictException.class);
         assertThat(history(product.id())).isEqualTo(history);
         assertChain(product.id());
+    }
+
+    @Test
+    void signedAdjustmentsCommitWithHistoryAndKeepRestockCompatible() throws Exception {
+        ProductResponse product = product(10);
+        mvc.perform(post("/api/products/{id}/adjust-stock", product.id()).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"delta\":-3,\"reason\":\" Damaged products \"}"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.stockQuantity").value(7));
+        mvc.perform(post("/api/products/{id}/adjust-stock", product.id()).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"delta\":5,\"reason\":\"Stock count correction\"}"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.stockQuantity").value(12));
+        mvc.perform(post("/api/products/{id}/restock", product.id()).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"quantity\":2,\"reason\":\"Delivery\"}"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.stockQuantity").value(14));
+        var history = history(product.id());
+        assertThat(history).extracting(StockMovementResponse::type).containsExactly(StockMovementType.INITIAL_STOCK,
+                StockMovementType.MANUAL_ADJUSTMENT, StockMovementType.MANUAL_ADJUSTMENT, StockMovementType.MANUAL_RESTOCK);
+        assertThat(history).extracting(StockMovementResponse::quantityDelta).containsExactly(10, -3, 5, 2);
+        assertThat(history.get(1).reason()).isEqualTo("Damaged products");
+        assertThat(history.subList(1, 3)).allSatisfy(m -> {
+            assertThat(m.referenceOrderId()).isNull();
+            assertThat(m.createdAt()).isNotNull();
+        });
+        mvc.perform(get("/api/products/{id}/stock-movements", product.id()).param("size", "2").param("sort", "createdAt,asc"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.totalElements").value(4))
+                .andExpect(jsonPath("$.content[1].type").value("MANUAL_ADJUSTMENT"))
+                .andExpect(jsonPath("$.content[1].quantityDelta").value(-3))
+                .andExpect(jsonPath("$.content[1].stockBefore").value(10))
+                .andExpect(jsonPath("$.content[1].stockAfter").value(7));
+        assertChain(product.id());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {-11, Integer.MIN_VALUE, Integer.MAX_VALUE})
+    void outOfRangeAdjustmentReturns409WithoutStockOrHistoryChanges(int delta) throws Exception {
+        ProductResponse product = product(10);
+        var before = history(product.id());
+        mvc.perform(post("/api/products/{id}/adjust-stock", product.id()).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"delta\":" + delta + ",\"reason\":\"Correction\"}"))
+                .andExpect(status().isConflict()).andExpect(jsonPath("$.status").value(409));
+        assertThat(products.getById(product.id()).stockQuantity()).isEqualTo(10);
+        assertThat(history(product.id())).isEqualTo(before);
+    }
+
+    @Test
+    void adjustmentCanReachZeroAndMaximumAndDoesNotReactivateProduct() {
+        ProductResponse product = product(10);
+        products.changeAvailability(product.id(), new ProductAvailabilityRequest(false));
+        assertThat(products.adjustStock(product.id(), new AdjustStockRequest(-10, "Write off all damaged items")).stockQuantity()).isZero();
+        var maximum = products.adjustStock(product.id(), new AdjustStockRequest(Integer.MAX_VALUE, "Stock count correction"));
+        assertThat(maximum.stockQuantity()).isEqualTo(Integer.MAX_VALUE);
+        assertThat(maximum.active()).isFalse();
+        assertThat(history(product.id())).extracting(StockMovementResponse::stockAfter).containsExactly(10, 0, Integer.MAX_VALUE);
+    }
+
+    @Test
+    void customerAndAnonymousCannotAdjustStockAndMethodSecurityIsEnforced() throws Exception {
+        ProductResponse product = product(10);
+        long customerId = jdbc.queryForObject("""
+                INSERT INTO app_users(email,password_hash,role,created_at) VALUES (?,?,'CUSTOMER',now())
+                ON CONFLICT(email) DO UPDATE SET email=EXCLUDED.email RETURNING id
+                """, Long.class, "inventory-customer@example.com", TestSecurity.PASSWORD_HASH);
+        String token = tokens.issue(users.findById(customerId).orElseThrow()).accessToken();
+        mvc.perform(post("/api/products/{id}/adjust-stock", product.id())
+                        .header("Authorization", "Bearer " + token)
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"delta\":-1,\"reason\":\"Damaged\"}"))
+                .andExpect(status().isForbidden());
+        mvc.perform(post("/api/products/{id}/adjust-stock", product.id())
+                        .with(org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.anonymous())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"delta\":-1,\"reason\":\"Damaged\"}"))
+                .andExpect(status().isUnauthorized());
+        SecurityContextHolder.getContext().setAuthentication(UsernamePasswordAuthenticationToken.authenticated(
+                Long.toString(customerId), null, List.of(new SimpleGrantedAuthority("ROLE_CUSTOMER"))));
+        try {
+            assertThatThrownBy(() -> products.adjustStock(product.id(), new AdjustStockRequest(-1, "Damaged")))
+                    .isInstanceOf(AccessDeniedException.class);
+        } finally { authenticateAdmin(); }
+        assertThat(products.getById(product.id()).stockQuantity()).isEqualTo(10);
+        assertThat(history(product.id())).hasSize(1);
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void adjustmentAndOrderSerializeInEitherLockOrderWithoutLostStock(boolean adjustmentFirst) throws Exception {
+        ProductResponse product = product(10);
+        Supplier<Boolean> adjustment = () -> {
+            products.adjustStock(product.id(), new AdjustStockRequest(-3, "Damaged products"));
+            return true;
+        };
+        Supplier<Boolean> purchase = () -> { orders.create(request(product.id(), 4)); return true; };
+        assertThat(overlap(adjustmentFirst ? adjustment : purchase,
+                () -> (adjustmentFirst ? purchase : adjustment).get())).containsExactly(true, true);
+        assertThat(products.getById(product.id()).stockQuantity()).isEqualTo(3);
+        assertThat(history(product.id())).hasSize(3);
+        assertChain(product.id());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {true, false})
+    void competingAdjustmentAndOrderRevalidateStockAfterWaitingForLock(boolean adjustmentFirst) throws Exception {
+        ProductResponse product = product(10);
+        assertThat(overlap(() -> {
+            if (adjustmentFirst) { products.adjustStock(product.id(), new AdjustStockRequest(-8, "Damaged products")); }
+            else { orders.create(request(product.id(), 8)); }
+            return true;
+        }, () -> {
+            assertThatThrownBy(() -> {
+                if (adjustmentFirst) { orders.create(request(product.id(), 3)); }
+                else { products.adjustStock(product.id(), new AdjustStockRequest(-3, "Damaged products")); }
+            }).isInstanceOf(ConflictException.class);
+            return false;
+        })).containsExactly(true, false);
+        assertThat(products.getById(product.id()).stockQuantity()).isEqualTo(2);
+        assertThat(history(product.id())).hasSize(2);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM customer_orders", Long.class)).isEqualTo(adjustmentFirst ? 0 : 1);
+        assertChain(product.id());
+    }
+
+    @Test
+    void v8MigrationPreservesAllExistingMovementTypesAndAcceptsBothAdjustmentSigns() {
+        String schema = "adjustment_upgrade";
+        try {
+            Flyway.configure().dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
+                    .schemas(schema).defaultSchema(schema).target("7").load().migrate();
+            jdbc.execute("INSERT INTO adjustment_upgrade.products(name,price,stock_quantity) VALUES ('Legacy',1,15)");
+            jdbc.execute("INSERT INTO adjustment_upgrade.customer_orders(status,total_amount,created_at) VALUES ('CANCELLED',3,now())");
+            jdbc.execute("""
+                    INSERT INTO adjustment_upgrade.stock_movements(product_id,movement_type,quantity_delta,stock_before,stock_after,reference_order_id,reason,created_at)
+                    VALUES (1,'INITIAL_STOCK',10,0,10,NULL,NULL,now()),
+                           (1,'MANUAL_RESTOCK',5,10,15,NULL,'Delivery',now()),
+                           (1,'ORDER_DEDUCTION',-3,15,12,1,NULL,now()),
+                           (1,'ORDER_CANCELLATION',3,12,15,1,NULL,now())
+                    """);
+            var before = jdbc.queryForList("SELECT * FROM adjustment_upgrade.stock_movements ORDER BY id");
+            Flyway.configure().dataSource(POSTGRES.getJdbcUrl(), POSTGRES.getUsername(), POSTGRES.getPassword())
+                    .schemas(schema).defaultSchema(schema).load().migrate();
+            assertThat(jdbc.queryForList("SELECT * FROM adjustment_upgrade.stock_movements ORDER BY id")).isEqualTo(before);
+            assertThat(jdbc.queryForObject("SELECT stock_quantity FROM adjustment_upgrade.products", Integer.class)).isEqualTo(15);
+            jdbc.execute("""
+                    INSERT INTO adjustment_upgrade.stock_movements(product_id,movement_type,quantity_delta,stock_before,stock_after,reason,created_at)
+                    VALUES (1,'MANUAL_ADJUSTMENT',-3,15,12,'Damaged products',now()),
+                           (1,'MANUAL_ADJUSTMENT',2,12,14,'Stock count correction',now())
+                    """);
+            assertThat(jdbc.queryForList("SELECT quantity_delta FROM adjustment_upgrade.stock_movements WHERE movement_type='MANUAL_ADJUSTMENT' ORDER BY id", Integer.class))
+                    .containsExactly(-3, 2);
+        } finally { jdbc.execute("DROP SCHEMA IF EXISTS adjustment_upgrade CASCADE"); }
     }
 
     @ParameterizedTest
@@ -125,7 +280,7 @@ class InventoryManagementIT extends com.example.ordermanagement.support.Authenti
     }
 
     @ParameterizedTest
-    @EnumSource(value = StockMovementType.class, names = {"ORDER_DEDUCTION", "ORDER_CANCELLATION", "MANUAL_RESTOCK"})
+    @EnumSource(value = StockMovementType.class, names = {"ORDER_DEDUCTION", "ORDER_CANCELLATION", "MANUAL_RESTOCK", "MANUAL_ADJUSTMENT"})
     void stockUpdateFailureRollsBackMovementInserts(StockMovementType type) {
         ProductResponse product = product(10);
         OrderResponse order = type == StockMovementType.ORDER_CANCELLATION ? orders.create(request(product.id(), 3)) : null;
@@ -315,6 +470,14 @@ class InventoryManagementIT extends com.example.ordermanagement.support.Authenti
                 new Object[]{product.id(), "INITIAL_STOCK", 10, 0, 10, null, null},
                 new Object[]{product.id(), "ORDER_DEDUCTION", -1, 10, 9, order.id(), null},
                 new Object[]{product.id(), "ORDER_DEDUCTION", Integer.MIN_VALUE, Integer.MAX_VALUE, 0, order.id(), null},
+                new Object[]{product.id(), "MANUAL_ADJUSTMENT", 0, 10, 10, null, "Zero"},
+                new Object[]{product.id(), "MANUAL_ADJUSTMENT", -1, 10, 9, order.id(), "Unexpected order"},
+                new Object[]{product.id(), "MANUAL_ADJUSTMENT", -1, 10, 9, null, null},
+                new Object[]{product.id(), "MANUAL_ADJUSTMENT", -1, 10, 9, null, " "},
+                new Object[]{product.id(), "MANUAL_ADJUSTMENT", -1, 10, 9, null, "x".repeat(501)},
+                new Object[]{product.id(), "MANUAL_ADJUSTMENT", -1, 0, -1, null, "Negative stock"},
+                new Object[]{product.id(), "MANUAL_ADJUSTMENT", 1, Integer.MAX_VALUE, 0, null, "Overflow"},
+                new Object[]{product.id(), "UNSUPPORTED_TYPE", -1, 10, 9, null, "Unknown type"},
                 new Object[]{999L, "MANUAL_RESTOCK", 1, 0, 1, null, "Missing product"});
         for (Object[] values : invalid) {
             assertThatThrownBy(() -> jdbc.update(insert, values)).isInstanceOf(DataIntegrityViolationException.class);
@@ -328,6 +491,7 @@ class InventoryManagementIT extends com.example.ordermanagement.support.Authenti
             case ORDER_DEDUCTION -> orders.create(request(productId, 3));
             case ORDER_CANCELLATION -> orders.cancel(order.id());
             case MANUAL_RESTOCK -> products.restock(productId, new RestockRequest(5, "Delivery"));
+            case MANUAL_ADJUSTMENT -> products.adjustStock(productId, new AdjustStockRequest(-3, "Damaged products"));
         }
     }
 

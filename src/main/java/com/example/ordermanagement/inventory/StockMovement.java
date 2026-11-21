@@ -90,6 +90,13 @@ public class StockMovement {
         return new StockMovement(product, StockMovementType.MANUAL_RESTOCK, quantity, before, null, reason.strip());
     }
 
+    public static StockMovement adjustment(Product product, int delta, int before, String reason) {
+        if (delta == 0 || reason == null || reason.isBlank() || reason.strip().length() > 500) {
+            throw new IllegalArgumentException("Adjustment requires nonzero delta and a reason of 1 to 500 characters");
+        }
+        return new StockMovement(product, StockMovementType.MANUAL_ADJUSTMENT, delta, before, null, reason.strip());
+    }
+
     private static void requireOrderAndQuantity(CustomerOrder order, int quantity) {
         if (order == null || quantity <= 0) {
             throw new IllegalArgumentException("Order movements require an order and positive quantity");

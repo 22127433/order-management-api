@@ -75,6 +75,38 @@ class StockMovementTest {
         assertThatThrownBy(() -> new StockMovementQuery(0, 20, sort)).isInstanceOf(BadRequestException.class);
     }
 
+    @ParameterizedTest
+    @ValueSource(ints = {3, -3})
+    void adjustmentKeepsSignedSnapshotAndReasonWithoutOrderReference(int delta) {
+        Product product = product(10);
+        product.adjustStock(delta);
+        StockMovement movement = StockMovement.adjustment(product, delta, 10, "  Stock count  ");
+        product.restoreStock(1);
+        assertThat(movement.getType()).isEqualTo(StockMovementType.MANUAL_ADJUSTMENT);
+        assertThat(movement.getQuantityDelta()).isEqualTo(delta);
+        assertThat(movement.getStockBefore()).isEqualTo(10);
+        assertThat(movement.getStockAfter()).isEqualTo(10 + delta);
+        assertThat(movement.getReason()).isEqualTo("Stock count");
+        assertThat(movement.getReferenceOrder()).isNull();
+        assertThat(movement.getCreatedAt()).isNotNull();
+    }
+
+    @Test
+    void adjustmentFactoryRejectsZeroInvalidReasonAndInconsistentBalances() {
+        for (String reason : new String[]{null, "", " ", "x".repeat(501)}) {
+            assertThatThrownBy(() -> StockMovement.adjustment(product(9), -1, 10, reason))
+                    .isInstanceOf(IllegalArgumentException.class);
+        }
+        assertThatThrownBy(() -> StockMovement.adjustment(product(10), 0, 10, "Correction"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> StockMovement.adjustment(product(10), -1, 10, "Correction"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> StockMovement.adjustment(product(0), Integer.MIN_VALUE, Integer.MAX_VALUE, "Correction"))
+                .isInstanceOf(IllegalArgumentException.class);
+        assertThatThrownBy(() -> StockMovement.adjustment(null, 1, 0, "Correction"))
+                .isInstanceOf(IllegalArgumentException.class);
+    }
+
     private Product product(int stock) {
         return new Product("Product", null, new BigDecimal("1.00"), stock);
     }

@@ -19,7 +19,7 @@ Prices are read from the database and snapshotted when ordering. Order/items, st
 | Language / build | Java 21, Maven 3.9.11 via Maven Wrapper |
 | Application | Spring Boot 3.5.16, Spring Web / MVC |
 | Persistence | Spring Data JPA, Hibernate, Spring JDBC for key arbitration |
-| Database / migrations | PostgreSQL 17, Flyway V1-V7 |
+| Database / migrations | PostgreSQL 17, Flyway V1-V8 |
 | Authentication | Spring Security 6.5.11, OAuth2 Resource Server / JOSE, Nimbus JWT |
 | Password storage | Spring BCryptPasswordEncoder, cost 12 |
 | Validation | Jakarta Validation and service guards |
@@ -86,6 +86,8 @@ Old idempotency receipts are retained with NULL user_id and their exact payload/
 
 Migration [V7](src/main/resources/db/migration/V7__product_availability.sql) adds `products.active BOOLEAN NOT NULL DEFAULT TRUE`. Every existing product remains active and new products default to active in both Java and PostgreSQL. V1-V6 are unchanged. No stock, order, price snapshot, or inventory movement is rewritten.
 
+Migration [V8](src/main/resources/db/migration/V8__manual_stock_adjustments.sql) extends only `ck_stock_movement_type` to accept MANUAL_ADJUSTMENT. V1-V7 and existing journal rows remain unchanged. The existing balance CHECK uses BIGINT arithmetic; nonnegative stock CHECKs, INTEGER storage bounds, foreign keys and history indexes remain in force. No new index is needed: adjustments use the existing product primary-key lock and product/time history index.
+
 User/order foreign keys use RESTRICT, with no cascade deletion of users/history. A user_id index supports order FK checks; the scoped key index also covers receipt user FK lookups. Stock history uses `(product_id, created_at DESC, id DESC)`. The price/ID index supports selective price pages. No plain name index is claimed to accelerate `%keyword%`; pg_trgm is not installed. See [ProductSearchIT](src/test/java/com/example/ordermanagement/integration/ProductSearchIT.java) for generated SQL and measured query plans, not a throughput benchmark.
 
 ## API Endpoints
@@ -102,6 +104,7 @@ Base URL: `http://localhost:8080`. JSON bodies. Supply `Authorization: Bearer <a
 | PUT | `/api/products/{id}` | ADMIN; replace metadata only | 200 |
 | DELETE | `/api/products/{id}` | ADMIN; no order/movement references | 204, empty body |
 | POST | `/api/products/{id}/restock` | ADMIN | 200 |
+| POST | `/api/products/{id}/adjust-stock` | ADMIN; signed nonzero delta, required reason | 200 |
 | PATCH | `/api/products/{id}/availability` | ADMIN; set active, no stock change | 200 |
 | GET | `/api/admin/products` | ADMIN; active/inactive catalog | 200, page |
 | GET | `/api/products/{id}/stock-movements` | ADMIN | 200, page |
@@ -191,6 +194,7 @@ Illustrative response for one matching order owned by the caller:
 - Product: nonblank name <=120, optional description <=2000, price >=0.01 with at most 12 integer/2 fractional digits. POST requires initial stock 0..2147483647; PUT accepts metadata only and any stockQuantity field returns 400.
 - Order: 1-100 distinct non-null items, positive product IDs, integer quantity 1..1000000. Prices/totals are server-calculated. Missing products return 404; insufficient stock returns 409.
 - Restock: quantity 1..2147483647, required trimmed reason <=500; resulting stock must fit INTEGER. Successful restock is not idempotent and adds stock again if repeated.
+- Adjustment: required signed INTEGER `delta` !=0; required trimmed, nonblank `reason` <=500. Zero/missing/fractional/out-of-INTEGER input returns 400. A valid delta that would make stock negative or exceed 2147483647 returns 409 without changing stock/history.
 - Search: optional `keyword` (trimmed, <=120, literal case-insensitive substring), inclusive nonnegative `minPrice`/`maxPrice` with min <= max, `inStock=true` (>0), false (=0), or omitted. All filters combine with AND.
 - Pages: page >=0, size 1..100, page*size <=2147483647. Product defaults: page=0,size=20,sort=id,asc; sort fields id/name/price/stockQuantity, optional asc/desc. Non-ID sorts add ID ascending. History permits only createdAt,asc or createdAt,desc (default desc), with ID in the same direction for ties.
 
@@ -206,7 +210,29 @@ The coordinator claims `(user_id,key)` with `INSERT ... ON CONFLICT DO NOTHING` 
 
 ### Stock adjustment and inventory history
 
-INITIAL_STOCK records opening stock, including zero; ORDER_DEDUCTION is negative with an order reference; ORDER_CANCELLATION is positive with an order reference; MANUAL_RESTOCK is positive with a reason. Every movement stores before/after snapshots and createdAt. No prior history is backfilled for legacy products. History is immutable through the API, not a tamper-proof audit system against database operators. Referenced products cannot be deleted, so new products with opening history return 409 on deletion; only unused legacy products can return 204.
+INITIAL_STOCK records opening stock, including zero; ORDER_DEDUCTION is negative with an order reference; ORDER_CANCELLATION is positive with an order reference; MANUAL_RESTOCK is positive with a reason. MANUAL_ADJUSTMENT has a signed nonzero delta, a required reason, and no order reference. Every movement stores before/after snapshots and createdAt. No prior history is backfilled for legacy products. History is immutable through the API, not a tamper-proof audit system against database operators. Referenced products cannot be deleted, so new products with opening history return 409 on deletion; only unused legacy products can return 204.
+
+ADMIN can correct damaged/miscounted inventory without changing metadata or availability:
+
+```http
+POST /api/products/1/adjust-stock
+Authorization: Bearer <ADMIN_ACCESS_TOKEN>
+Content-Type: application/json
+
+{"delta":-3,"reason":"Damaged products"}
+```
+
+For a product named Keyboard priced 59.90 with stock 10, this returns 200:
+
+```json
+{"id":1,"name":"Keyboard","description":null,"price":59.90,"stockQuantity":7,"active":true}
+```
+
+The history endpoint then includes a MANUAL_ADJUSTMENT with `quantityDelta=-3`, `stockBefore=10`, `stockAfter=7`, `referenceOrderId=null`, the trimmed reason and a server timestamp. Use a positive delta, for example `{"delta":5,"reason":"Stock count correction"}`, to increase stock. Inactive products can also be adjusted; they stay inactive. Restock retains its existing positive-quantity contract and MANUAL_RESTOCK type.
+
+[ProductService.adjustStock](src/main/java/com/example/ordermanagement/product/ProductService.java) starts a write transaction, acquires the same `PESSIMISTIC_WRITE` product-row lock used by ordering/restock/cancellation, reads stock before, and calls [Product.adjustStock](src/main/java/com/example/ordermanagement/product/Product.java). The domain method computes `(long) stockQuantity + delta`, checks both bounds, then changes state. The service saves the immutable movement in that same transaction. Any failed movement INSERT or stock UPDATE rolls back both. A waiting operation rechecks the committed stock after taking the lock. Adjustment locks only one product and never an order; multi-product orders still lock ascending product IDs, and cancellation locks the order first. No new lock-order cycle is introduced.
+
+**Retry behavior:** adjustment is not idempotent. Repeating a successful POST applies the delta and adds a new movement again; an Idempotency-Key header does not deduplicate it. If a response is lost, inspect history/reconcile before retrying blindly. Only order creation currently implements persistent idempotency.
 
 ## How to Run
 
@@ -249,7 +275,7 @@ After changing bootstrap flags/password in `.env`, recreate the API with `docker
 ### Swagger UI and health
 
 - [Swagger UI](http://localhost:8080/swagger-ui/index.html): run register/login, then click **Authorize** and paste only the returned accessToken (Swagger adds Bearer). Use CUSTOMER or ADMIN credentials for the operation's permission.
-- [OpenAPI JSON](http://localhost:8080/v3/api-docs), [YAML](http://localhost:8080/v3/api-docs.yaml): 18 documented business operations with DTOs, errors, and security requirements.
+- [OpenAPI JSON](http://localhost:8080/v3/api-docs), [YAML](http://localhost:8080/v3/api-docs.yaml): 19 documented business operations with DTOs, errors, and security requirements.
 - [Health](http://localhost:8080/actuator/health): status only, 200 UP / 503 DOWN. Other management endpoints are not exposed and security denies their requests (401 without authentication, 403 when authenticated). Environment/configprops/heapdump are not public. JMX endpoints and probes are disabled.
 
 Set API_DOCS_ENABLED=false to disable both Swagger and the spec. Authorization is not persisted by Swagger across reloads. Public endpoints can still return 401 if an invalid bearer token is explicitly supplied. The root `/` is not an API endpoint.
@@ -386,4 +412,4 @@ The [CI workflow](.github/workflows/ci.yml) runs verify -Pintegration on push/PR
 - **Migration compatibility:** Keep legacy owners/receipts NULL and ADMIN-only/archived rather than guessing user ownership. New application-created orders always have an owner. Schema nullability is an explicit compatibility limitation, not a claim that raw SQL obeys authorization. Existing API URLs/body shapes remain, with additive response userId; protected endpoints intentionally require authentication now.
 - **Scope:** One application/database, constructor injection, DTO boundaries, explicit Flyway migrations, and targeted indexes. No extra infrastructure is needed for these portfolio features.
 
-Feature verification on 21 November 2026: Maven Wrapper verify -Pintegration completed with BUILD SUCCESS; 529 cases passed (188 unit, 181 MVC, 160 PostgreSQL integration), with zero failures/errors/skips.
+Feature verification on 21 November 2026: Maven Wrapper verify -Pintegration completed with BUILD SUCCESS; 585 cases passed (212 unit, 199 MVC, 174 PostgreSQL integration), with zero failures/errors/skips.

@@ -33,7 +33,7 @@ public class OpenApiConfig {
                 .tags(List.of(new Tag().name("Authentication").description("Customer registration and stateless JWT login"),
                         new Tag().name("Products").description("Public catalog reads; ADMIN writes"),
                         new Tag().name("Orders").description("Creation, idempotent retries, and lifecycle actions"),
-                        new Tag().name("Inventory").description("Manual restock and immutable inventory movement history")))
+                        new Tag().name("Inventory").description("Manual restock, signed stock adjustments, and immutable inventory movement history")))
                 .components(new Components()
                         .addSecuritySchemes("bearerAuth", new SecurityScheme().type(SecurityScheme.Type.HTTP)
                                 .scheme("bearer").bearerFormat("JWT").description("Paste only the access token returned by login"))

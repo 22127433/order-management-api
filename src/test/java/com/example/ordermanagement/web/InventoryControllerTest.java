@@ -14,11 +14,14 @@ import static org.springframework.test.web.servlet.request.MockMvcRequestBuilder
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.status;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.anonymous;
+import static org.springframework.security.test.web.servlet.request.SecurityMockMvcRequestPostProcessors.user;
 
 import com.example.ordermanagement.common.ConflictException;
 import com.example.ordermanagement.common.PageResponse;
 import com.example.ordermanagement.common.ResourceNotFoundException;
 import com.example.ordermanagement.inventory.StockMovementQuery;
+import com.example.ordermanagement.inventory.AdjustStockRequest;
 import com.example.ordermanagement.inventory.StockMovementResponse;
 import com.example.ordermanagement.inventory.StockMovementType;
 import com.example.ordermanagement.product.ProductController;
@@ -44,6 +47,72 @@ class InventoryControllerTest {
     @MockitoBean private UserRepository users;
     @Autowired private MockMvc mvc;
     @MockitoBean private ProductService service;
+
+    @ParameterizedTest
+    @ValueSource(ints = {3, -3})
+    void adjustmentReturnsUpdatedProductWith200(int delta) throws Exception {
+        when(service.adjustStock(1L, new AdjustStockRequest(delta, "Correction")))
+                .thenReturn(new ProductResponse(1L, "Product", null, BigDecimal.ONE, 10 + delta));
+        mvc.perform(post("/api/products/1/adjust-stock").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"delta\":" + delta + ",\"reason\":\" Correction \"}"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.stockQuantity").value(10 + delta));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"delta\":null,\"reason\":\"Correction\"}", "{\"delta\":0,\"reason\":\"Correction\"}",
+            "{\"delta\":1.5,\"reason\":\"Correction\"}", "{\"delta\":2147483648,\"reason\":\"Correction\"}",
+            "{\"delta\":-2147483649,\"reason\":\"Correction\"}", "{\"delta\":1}", "{\"delta\":1,\"reason\":null}",
+            "{\"delta\":1,\"reason\":\" \"}", "{\"delta\":1,\"reason\":\"Correction\",\"extra\":true}"})
+    void invalidAdjustmentBodyReturns400BeforeService(String body) throws Exception {
+        mvc.perform(post("/api/products/1/adjust-stock").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.status").value(400))
+                .andExpect(jsonPath("$.path").value("/api/products/1/adjust-stock"));
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void adjustmentRejectsOverlongReasonAndAcceptsMaximumLength() throws Exception {
+        mvc.perform(post("/api/products/1/adjust-stock").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"delta\":1,\"reason\":\"" + "x".repeat(501) + "\"}"))
+                .andExpect(status().isBadRequest());
+        verifyNoInteractions(service);
+        when(service.adjustStock(eq(1L), any())).thenReturn(new ProductResponse(1L, "Product", null, BigDecimal.ONE, 11));
+        mvc.perform(post("/api/products/1/adjust-stock").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"delta\":1,\"reason\":\"" + "x".repeat(500) + "\"}"))
+                .andExpect(status().isOk());
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"0", "-1", "abc"})
+    void invalidAdjustmentIdReturns400BeforeService(String id) throws Exception {
+        mvc.perform(post("/api/products/{id}/adjust-stock", id).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"delta\":-1,\"reason\":\"Damaged\"}"))
+                .andExpect(status().isBadRequest());
+        verifyNoInteractions(service);
+    }
+
+    @Test
+    void adjustmentNotFoundAndStockConflictsUseStandardErrors() throws Exception {
+        when(service.adjustStock(eq(1L), any())).thenThrow(new ResourceNotFoundException("Product", 1L));
+        when(service.adjustStock(eq(2L), any())).thenThrow(new ConflictException("Stock adjustment would exceed the limit"));
+        for (long id : new long[]{1L, 2L}) {
+            int expected = id == 1 ? 404 : 409;
+            mvc.perform(post("/api/products/{id}/adjust-stock", id).contentType(MediaType.APPLICATION_JSON)
+                            .content("{\"delta\":1,\"reason\":\"Correction\"}"))
+                    .andExpect(status().is(expected)).andExpect(jsonPath("$.status").value(expected));
+        }
+    }
+
+    @Test
+    void adjustmentRequiresAdminAndAnonymousReceives401() throws Exception {
+        mvc.perform(post("/api/products/1/adjust-stock").with(user("2").roles("CUSTOMER"))
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"delta\":-1,\"reason\":\"Damaged\"}"))
+                .andExpect(status().isForbidden()).andExpect(jsonPath("$.status").value(403));
+        mvc.perform(post("/api/products/1/adjust-stock").with(anonymous())
+                        .contentType(MediaType.APPLICATION_JSON).content("{\"delta\":-1,\"reason\":\"Damaged\"}"))
+                .andExpect(status().isUnauthorized()).andExpect(jsonPath("$.status").value(401));
+        verifyNoInteractions(service);
+    }
 
     @Test
     void restockReturnsUpdatedProductWith200() throws Exception {

@@ -6,6 +6,7 @@ import com.example.ordermanagement.common.PageResponse;
 import com.example.ordermanagement.common.ResourceNotFoundException;
 import com.example.ordermanagement.order.OrderItemRepository;
 import com.example.ordermanagement.inventory.RestockRequest;
+import com.example.ordermanagement.inventory.AdjustStockRequest;
 import com.example.ordermanagement.inventory.StockMovement;
 import com.example.ordermanagement.inventory.StockMovementQuery;
 import com.example.ordermanagement.inventory.StockMovementRepository;
@@ -91,6 +92,20 @@ public class ProductService {
         int before = product.getStockQuantity();
         product.restoreStock(request.quantity());
         stockMovementRepository.save(StockMovement.restock(product, request.quantity(), before, request.reason()));
+        return ProductResponse.from(product);
+    }
+
+    @Transactional
+    @PreAuthorize("hasRole('ADMIN')")
+    public ProductResponse adjustStock(Long id, AdjustStockRequest request) {
+        if (request == null || request.delta() == null || request.delta() == 0
+                || request.reason() == null || request.reason().isBlank() || request.reason().length() > 500) {
+            throw new BadRequestException("Adjustment requires nonzero delta and a reason of 1 to 500 characters");
+        }
+        Product product = findForUpdate(id);
+        int before = product.getStockQuantity();
+        product.adjustStock(request.delta());
+        stockMovementRepository.save(StockMovement.adjustment(product, request.delta(), before, request.reason()));
         return ProductResponse.from(product);
     }
 

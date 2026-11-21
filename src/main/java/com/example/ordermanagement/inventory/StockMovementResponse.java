@@ -8,7 +8,7 @@ public record StockMovementResponse(@Schema(example = "1") Long id, @Schema(exam
                                     StockMovementType type, @Schema(example = "5", description = "Signed inventory change") int quantityDelta,
                                     @Schema(example = "20") int stockBefore, @Schema(example = "25") int stockAfter,
                                     @Schema(nullable = true, description = "Present for order deduction/cancellation only") Long referenceOrderId,
-                                    @Schema(nullable = true, example = "Supplier delivery", description = "Present for manual restock only")
+                                    @Schema(nullable = true, example = "Supplier delivery", description = "Required for manual restock and manual adjustment; absent for opening/order movements")
                                     String reason, @Schema(example = "2026-11-17T10:00:00Z") Instant createdAt) {
     public static StockMovementResponse from(StockMovement movement) {
         return new StockMovementResponse(movement.getId(), movement.getProduct().getId(), movement.getType(),

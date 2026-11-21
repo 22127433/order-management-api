@@ -12,6 +12,7 @@ import static org.mockito.Mockito.when;
 import com.example.ordermanagement.common.ConflictException;
 import com.example.ordermanagement.common.BadRequestException;
 import com.example.ordermanagement.inventory.RestockRequest;
+import com.example.ordermanagement.inventory.AdjustStockRequest;
 import com.example.ordermanagement.inventory.StockMovement;
 import com.example.ordermanagement.inventory.StockMovementQuery;
 import com.example.ordermanagement.inventory.StockMovementRepository;
@@ -268,6 +269,57 @@ class ProductServiceTest {
                 .thenReturn(new PageImpl<>(List.of(product), search.pageable(), 1));
         assertThat(service.findAllForAdmin(search, false).content()).extracting(ProductResponse::active).containsExactly(false);
         verify(repository, never()).findAll();
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {5, -1})
+    void adjustsLockedProductAndWritesSignedMovement(int delta) {
+        Product product = product();
+        when(repository.findByIdForUpdate(1L)).thenReturn(Optional.of(product));
+        assertThat(service.adjustStock(1L, new AdjustStockRequest(delta, "  Stock count correction  ")).stockQuantity())
+                .isEqualTo(1 + delta);
+        ArgumentCaptor<StockMovement> movement = ArgumentCaptor.forClass(StockMovement.class);
+        verify(stockMovementRepository).save(movement.capture());
+        assertThat(movement.getValue().getType()).isEqualTo(StockMovementType.MANUAL_ADJUSTMENT);
+        assertThat(movement.getValue().getQuantityDelta()).isEqualTo(delta);
+        assertThat(movement.getValue().getStockBefore()).isEqualTo(1);
+        assertThat(movement.getValue().getStockAfter()).isEqualTo(1 + delta);
+        assertThat(movement.getValue().getReason()).isEqualTo("Stock count correction");
+        assertThat(movement.getValue().getReferenceOrder()).isNull();
+        verify(repository).findByIdForUpdate(1L);
+        verify(repository, never()).save(any());
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {-2, Integer.MIN_VALUE, Integer.MAX_VALUE})
+    void invalidAdjustmentBalanceDoesNotChangeStockOrWriteMovement(int delta) {
+        Product product = product();
+        when(repository.findByIdForUpdate(1L)).thenReturn(Optional.of(product));
+        assertThatThrownBy(() -> service.adjustStock(1L, new AdjustStockRequest(delta, "Correction")))
+                .isInstanceOf(ConflictException.class);
+        assertThat(product.getStockQuantity()).isEqualTo(1);
+        verifyNoInteractions(stockMovementRepository);
+    }
+
+    @Test
+    void invalidAdjustmentRequestIsRejectedBeforeLock() {
+        assertThatThrownBy(() -> service.adjustStock(1L, null)).isInstanceOf(BadRequestException.class);
+        assertThatThrownBy(() -> service.adjustStock(1L, new AdjustStockRequest(null, "Correction")))
+                .isInstanceOf(BadRequestException.class);
+        assertThatThrownBy(() -> new AdjustStockRequest(0, "Correction")).isInstanceOf(BadRequestException.class);
+        for (String reason : new String[]{null, "", " ", "x".repeat(501)}) {
+            assertThatThrownBy(() -> service.adjustStock(1L, new AdjustStockRequest(-1, reason)))
+                    .isInstanceOf(BadRequestException.class);
+        }
+        verifyNoInteractions(repository, stockMovementRepository);
+    }
+
+    @Test
+    void missingAdjustmentProductDoesNotWriteMovement() {
+        when(repository.findByIdForUpdate(1L)).thenReturn(Optional.empty());
+        assertThatThrownBy(() -> service.adjustStock(1L, new AdjustStockRequest(1, "Correction")))
+                .isInstanceOf(ResourceNotFoundException.class);
+        verifyNoInteractions(stockMovementRepository);
     }
 
     private ProductRequest request() {

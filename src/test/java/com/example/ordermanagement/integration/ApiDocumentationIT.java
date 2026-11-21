@@ -57,11 +57,11 @@ class ApiDocumentationIT extends com.example.ordermanagement.support.JwtTestProp
         assertThat(spec.path("openapi").asText()).startsWith("3.0.");
         assertThat(spec.at("/info/title").asText()).isEqualTo("Order Management API");
         for (String path : List.of("/api/auth/register", "/api/auth/login", "/api/products", "/api/products/{id}", "/api/products/{id}/restock",
-                "/api/products/{id}/stock-movements", "/api/products/{id}/availability", "/api/admin/products", "/api/orders", "/api/orders/{id}",
+                "/api/products/{id}/stock-movements", "/api/products/{id}/adjust-stock", "/api/products/{id}/availability", "/api/admin/products", "/api/orders", "/api/orders/{id}",
                 "/api/orders/{id}/confirm", "/api/orders/{id}/ship", "/api/orders/{id}/deliver", "/api/orders/{id}/cancel")) {
             assertThat(spec.path("paths").has(path)).as(path).isTrue();
         }
-        assertThat(spec.path("paths").size()).isEqualTo(14);
+        assertThat(spec.path("paths").size()).isEqualTo(15);
         int operations = 0;
         for (JsonNode path : spec.path("paths")) {
             for (JsonNode operation : path) {
@@ -73,7 +73,7 @@ class ApiDocumentationIT extends com.example.ordermanagement.support.JwtTestProp
                 }
             }
         }
-        assertThat(operations).isEqualTo(18);
+        assertThat(operations).isEqualTo(19);
         assertReferencesResolve(spec, spec);
     }
 
@@ -230,6 +230,28 @@ class ApiDocumentationIT extends com.example.ordermanagement.support.JwtTestProp
     @ValueSource(strings = {"env", "configprops", "beans", "metrics", "info", "heapdump", "loggers"})
     void otherActuatorEndpointsAreNotExposed(String endpoint) {
         assertThat(http.getForEntity("/actuator/" + endpoint, String.class).getStatusCode()).isEqualTo(HttpStatus.UNAUTHORIZED);
+    }
+
+    @Test
+    void stockAdjustmentDocumentsSignedDeltaBoundsReasonErrorsAndBearerSecurity() {
+        JsonNode spec = specification();
+        JsonNode adjustment = spec.path("paths").path("/api/products/{id}/adjust-stock").path("post");
+        assertThat(adjustment.path("description").asText()).contains("ADMIN only", "nonzero", "MANUAL_ADJUSTMENT", "long arithmetic", "409", "repeating");
+        assertThat(adjustment.has("security")).isFalse();
+        for (String code : List.of("200", "400", "401", "403", "404", "409", "500")) {
+            assertThat(adjustment.path("responses").has(code)).as(code).isTrue();
+        }
+        JsonNode request = spec.at("/components/schemas/AdjustStockRequest");
+        assertThat(request.path("properties").size()).isEqualTo(2);
+        assertThat(request.path("required").toString()).contains("delta", "reason");
+        assertThat(request.at("/properties/delta/minimum").asLong()).isEqualTo(Integer.MIN_VALUE);
+        assertThat(request.at("/properties/delta/maximum").asLong()).isEqualTo(Integer.MAX_VALUE);
+        assertThat(request.at("/properties/delta/description").asText()).contains("zero is invalid");
+        assertThat(request.at("/properties/reason/maxLength").asInt()).isEqualTo(500);
+        assertThat(spec.at("/components/schemas/StockMovementResponse/properties/type/enum").toString())
+                .contains("MANUAL_ADJUSTMENT", "MANUAL_RESTOCK", "INITIAL_STOCK", "ORDER_DEDUCTION", "ORDER_CANCELLATION");
+        assertThat(spec.at("/components/schemas/StockMovementResponse/properties/reason/description").asText())
+                .contains("manual restock", "manual adjustment");
     }
 
     private JsonNode specification() {

@@ -554,3 +554,65 @@ Authorization: Bearer {{adminToken}}
 Content-Type: application/json
 
 {"name":"Mechanical Keyboard","description":"Legacy payload","price":59.90,"stockQuantity":{{getCurrentProductStock.response.body.$.stockQuantity}}}
+
+### 96. ADMIN Increase Stock by Adjustment -> 200, MANUAL_ADJUSTMENT history entry
+# Not idempotent: every successful execution applies the delta again, even with Idempotency-Key.
+POST {{baseUrl}}/api/products/{{keyboardId}}/adjust-stock
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"delta":5,"reason":"Stock count correction"}
+
+### 97. ADMIN Decrease Stock by Adjustment -> 200 if at least 3 remain; otherwise 409
+POST {{baseUrl}}/api/products/{{keyboardId}}/adjust-stock
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"delta":-3,"reason":"Damaged products"}
+
+### 98. Inspect Adjustment History -> 200, signed delta, before/after, reason and no reference order
+GET {{baseUrl}}/api/products/{{keyboardId}}/stock-movements?page=0&size=20&sort=createdAt,desc
+Authorization: Bearer {{adminToken}}
+
+### 99. Reject Zero Adjustment -> 400
+POST {{baseUrl}}/api/products/{{keyboardId}}/adjust-stock
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"delta":0,"reason":"No change"}
+
+### 100. Reject Blank Adjustment Reason -> 400
+POST {{baseUrl}}/api/products/{{keyboardId}}/adjust-stock
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"delta":-1,"reason":" "}
+
+### 101. Reject Negative Result -> 409; stock and history unchanged
+# Even maximum INTEGER stock cannot accommodate this negative delta.
+POST {{baseUrl}}/api/products/{{keyboardId}}/adjust-stock
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"delta":-2147483648,"reason":"Would make stock negative"}
+
+### 102. Reject Stock Overflow -> 409 when current stock is positive
+# For stock=0 this valid delta reaches Integer.MAX_VALUE and succeeds. Check current stock first.
+POST {{baseUrl}}/api/products/{{keyboardId}}/adjust-stock
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"delta":2147483647,"reason":"Would exceed storage capacity when stock is positive"}
+
+### 103. CUSTOMER Cannot Adjust Stock -> 403
+POST {{baseUrl}}/api/products/{{keyboardId}}/adjust-stock
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{"delta":-1,"reason":"Damaged products"}
+
+### 104. Anonymous Cannot Adjust Stock -> 401
+POST {{baseUrl}}/api/products/{{keyboardId}}/adjust-stock
+Content-Type: application/json
+
+{"delta":1,"reason":"Stock count correction"}

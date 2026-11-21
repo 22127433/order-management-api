@@ -89,6 +89,20 @@ public class Product {
         stockQuantity += quantity;
     }
 
+    public void adjustStock(int delta) {
+        if (delta == 0) {
+            throw new IllegalArgumentException("Stock adjustment delta must not be zero");
+        }
+        long adjusted = (long) stockQuantity + delta;
+        if (adjusted < 0) {
+            throw new ConflictException("Stock adjustment would make stock negative for product " + id);
+        }
+        if (adjusted > Integer.MAX_VALUE) {
+            throw new ConflictException("Stock adjustment would exceed the limit for product " + id);
+        }
+        stockQuantity = (int) adjusted;
+    }
+
     private void requirePositiveQuantity(int quantity) {
         if (quantity <= 0) {
             throw new IllegalArgumentException("Quantity must be positive");

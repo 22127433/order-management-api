@@ -1253,7 +1253,7 @@ Unit test không mở transaction PostgreSQL. JwtConfigTest dùng Nimbus thật 
 | listingDoesNotChangeDetailResponseOrAnyBusinessData | Detail vẫn có items/userId; stock, movements, receipt và số đơn không đổi. |
 | unauthenticatedRequestIs401AndInvalidFiltersAre400WithRealBackend | Kiểm tra status HTTP bằng filter và backend thật. |
 
-**OpenAPI:** `orderListingDocumentsFiltersSummaryPaginationAndInheritedBearerSecurity` trong [ApiDocumentationIT][apidocit] kiểm tra5 query params, schema summary4 field, pagination/status/error và bearer requirement kế thừa. Spec hiện có18 operations/14paths; mốc smoke15 operation ngày18/11 ở trên là lịch sử. Các test listing không thay cho bằng chứng rollback/concurrency của OrderManagementIT/OrderIdempotencyIT; toàn bộ regression vẫn được giữ. [OrderManagementIT][it], [OrderIdempotencyIT][idemit].
+**OpenAPI:** `orderListingDocumentsFiltersSummaryPaginationAndInheritedBearerSecurity` trong [ApiDocumentationIT][apidocit] kiểm tra5 query params, schema summary4 field, pagination/status/error và bearer requirement kế thừa. Spec hiện có19 operations/15paths; mốc smoke15 operation ngày18/11 ở trên là lịch sử. Các test listing không thay cho bằng chứng rollback/concurrency của OrderManagementIT/OrderIdempotencyIT; toàn bộ regression vẫn được giữ. [OrderManagementIT][it], [OrderIdempotencyIT][idemit].
 
 ### 8.12. Product active/inactive: ngừng bán nhưng giữ lịch sử
 
@@ -1333,6 +1333,48 @@ Các test mới/cập nhật quan trọng:
 | [ApiDocumentationIT][apidocit] — metadataPutHasDedicatedSchemaWithoutStockAndCreationStillRequiresInitialStock | Spec POST→ProductRequest có stock bắt buộc; PUT→UpdateProductRequest đúng ba field/validation và giải thích400. |
 
 InventoryManagementIT cập nhật payload stock bị400 và giữ FK/history assertions. ProductAvailabilityIT, OrderIdempotencyIT và test snapshot dùng DTO mới; OrderServiceTest gọi updateMetadata thay method nhận stock cũ. Demo script gửi metadata-only PUT cả trước/sau order và assert stock18 không bị reset. Mock unit/MVC không chứng minh các row-lock outcome; phần đó nằm ở PostgreSQL IT. [InventoryManagementIT][inventoryit], [ProductAvailabilityIT][availabilityit], [OrderIdempotencyIT][idemit], [demo.ps1][demoscript].
+
+### 8.14. Manual Inventory Adjustment: delta có dấu và journal nguyên tử
+
+**Nền tảng:** Restock chỉ nhập thêm; adjustment dùng khi kiểm kê hoặc hàng hỏng. Tồn10, phát hiện3 sản phẩm hỏng thì delta=-3 và stockAfter=7. Không xóa/sửa movement cũ để giả vờ hàng chưa từng tồn tại. API ADMIN nhận delta INTEGER khác0 và reason đã trim, nonblank, tối đa500; không nhận order reference. Product inactive cũng được điều chỉnh và vẫn inactive. Căn cứ: [AdjustStockRequest][adjustrequest], [ProductController.adjustStock][pc], [StockMovement.adjustment][movement].
+
+**Trace:** SecurityConfig yêu cầu ADMIN → controller deserialize DTO, constructor từ chối delta0, @Valid kiểm tra null/reason → proxy ProductService.adjustStock kiểm tra quyền và mở write transaction → kiểm tra input khi gọi trực tiếp → findForUpdate lấy PESSIMISTIC_WRITE → lưu before → Product.adjustStock tính `(long) stockQuantity + delta` → nếu kết quả <0 hoặc >Integer.MAX_VALUE thì409 trước khi đổi state → gán stock → factory tạo MANUAL_ADJUSTMENT chứa delta/before/after/reason, referenceOrder=null → repository INSERT → dirty checking flush UPDATE → commit cùng nhau. Lỗi SQL rollback toàn giao dịch. Null/zero/decimal/delta ngoài INTEGER là400; delta hợp lệ nhưng kết quả ngoài giới hạn là409. Căn cứ: [ProductService][ps], [Product][product], [ProductRepository][pr], [GlobalExceptionHandler][advice].
+
+**Vì sao long?** Với int, MAX_VALUE+1 có thể thành số âm. Cast stock sang long trước phép cộng để kiểm tra đúng cả delta MIN_VALUE, không dùng Math.abs/đổi dấu delta có thể overflow. Chỉ cast về int sau khi xác nhận0..MAX_VALUE. Domain guard không thay thế khóa DB: nếu Order lấy khóa trước, adjustment phải chờ rồi tính lại từ stock đã commit; thứ tự ngược cũng vậy. Adjustment chỉ khóa một product, không khóa order; ordering nhiều product vẫn tăng dần ID, cancel vẫn order trước rồi product tăng dần. Căn cứ: [Product.adjustStock][product], [OrderService.lockProducts][os], [ProductStockAdjustmentTest][adjustdomaintest], [InventoryManagementIT][inventoryit].
+
+**Database:** V8 thay CHECK type, giữ nguyên4 nhánh cũ và thêm MANUAL_ADJUSTMENT với delta<>0, reason nonblank, order NULL. CHECK balance BIGINT, stock>=0, INTEGER, FK và index hiện có vẫn áp dụng; không thêm bảng/subsystem/index mới, không backfill hay viết lại lịch sử. Test migrate schema riêng V7→V8 so sánh nguyên các dòng cũ. Căn cứ: [V4][inventoryschema], [V8][adjustschema], [StockMovement][movement], [StockMovementRepository][movementrepo].
+
+**Giới hạn retry:** Adjustment chưa hỗ trợ Idempotency-Key. Lặp thành công tạo thêm movement và thay stock lần nữa. Response bị mất thì kiểm tra lịch sử/đối soát trước khi retry; không nhận exactly-once cho thao tác này. Restock giữ nguyên contract và type MANUAL_RESTOCK. Căn cứ: [ProductController][pc], [ProductService][ps], [README](README.md#stock-adjustment-and-inventory-history).
+
+**Trả lời phỏng vấn 30–60 giây:** “Em thêm adjustment vào ProductService hiện có để tăng hoặc giảm stock, lưu lý do và snapshot vào StockMovement. Em khóa product bằng PESSIMISTIC_WRITE giống Order, tính kết quả bằng long và chặn âm/overflow trước khi thay state. Stock và journal cùng transaction; PostgreSQL integration test gây lỗi movement INSERT và stock UPDATE để kiểm tra rollback hai chiều. Test concurrency xác nhận request thật sự chờ row lock ở cả hai thứ tự rồi kiểm tra stock và chuỗi journal. Migration V8 chỉ mở rộng CHECK, giữ các dòng cũ. API yêu cầu ADMIN ở HTTP và service, chưa deduplicate retry.” Căn cứ: [ProductService][ps], [V8][adjustschema], [InventoryManagementIT][inventoryit].
+
+| Class/method | Bằng chứng / giới hạn |
+| --- | --- |
+| [ProductStockAdjustmentTest][adjustdomaintest] — appliesSignedDeltaIncludingExactStorageBounds | Delta âm/dương, kết quả đúng0/MAX; không đổi metadata/active. Unit Java. |
+| [ProductStockAdjustmentTest][adjustdomaintest] — rejectsOutOfRangeResultBeforeMutatingState | Stock âm, overflow cộng và MIN_VALUE bị từ chối trước mutation. |
+| [ProductStockAdjustmentTest][adjustdomaintest] — rejectsZeroWithoutMutatingStock | Domain không nhận delta0. |
+| [StockMovementTest][movementtest] — adjustmentKeepsSignedSnapshotAndReasonWithoutOrderReference | Delta hai dấu, reason trim, null order, snapshot không đi theo stock hiện tại. |
+| [StockMovementTest][movementtest] — adjustmentFactoryRejectsZeroInvalidReasonAndInconsistentBalances | Guard factory: zero, reason, balance, null product và trường hợp MIN_VALUE. |
+| [ProductServiceTest][pst] — adjustsLockedProductAndWritesSignedMovement | Repository mock: gọi write-lock query, DTO stock đúng, save movement có dấu/snapshot/reason. Không chứng minh SQL/transaction. |
+| [ProductServiceTest][pst] — invalidAdjustmentBalanceDoesNotChangeStockOrWriteMovement | Negative/overflow result409, không gọi save journal. |
+| [ProductServiceTest][pst] — invalidAdjustmentRequestIsRejectedBeforeLock | Null request/delta, zero constructor, reason lỗi bị từ chối trước repository. |
+| [ProductServiceTest][pst] — missingAdjustmentProductDoesNotWriteMovement | Product không tồn tại404, không ghi journal. |
+| [InventoryControllerTest][inventorywebtest] — adjustmentReturnsUpdatedProductWith200 | MVC bind delta âm/dương, trim reason, trả ProductResponse. Service mock. |
+| [InventoryControllerTest][inventorywebtest] — invalidAdjustmentBodyReturns400BeforeService | Required/zero/decimal/out-of-INTEGER/unknown field400 trước service. |
+| [InventoryControllerTest][inventorywebtest] — adjustmentRejectsOverlongReasonAndAcceptsMaximumLength | Reason501 bị400;500 được chấp nhận. |
+| [InventoryControllerTest][inventorywebtest] — invalidAdjustmentIdReturns400BeforeService | ID0/âm/không phải số400. |
+| [InventoryControllerTest][inventorywebtest] — adjustmentNotFoundAndStockConflictsUseStandardErrors | HTTP404/409 giữ ApiError. |
+| [InventoryControllerTest][inventorywebtest] — adjustmentRequiresAdminAndAnonymousReceives401 | CUSTOMER403, anonymous401, không gọi service mock. |
+| [InventoryManagementIT][inventoryit] — signedAdjustmentsCommitWithHistoryAndKeepRestockCompatible | PostgreSQL commit cả stock/journal, hai dấu, pagination history DTO và restock cũ. |
+| [InventoryManagementIT][inventoryit] — outOfRangeAdjustmentReturns409WithoutStockOrHistoryChanges | HTTP409 thật, query DB/history không đổi sau lỗi. |
+| [InventoryManagementIT][inventoryit] — adjustmentCanReachZeroAndMaximumAndDoesNotReactivateProduct | Persist các biên và giữ inactive. |
+| [InventoryManagementIT][inventoryit] — customerAndAnonymousCannotAdjustStockAndMethodSecurityIsEnforced | CUSTOMER JWT thật403, anonymous401 và service proxy chặn gọi trực tiếp; stock/journal không đổi. |
+| [InventoryManagementIT][inventoryit] — adjustmentAndOrderSerializeInEitherLockOrderWithoutLostStock | Hai thứ tự khóa, pg_stat_activity thấy chờ, cả hai commit và stock10-3-4=3; journal liên tục. |
+| [InventoryManagementIT][inventoryit] — competingAdjustmentAndOrderRevalidateStockAfterWaitingForLock | Hai thứ tự tranh stock: thao tác đầu dùng8, waiter cần3 bị409; chỉ một write thành công. |
+| [InventoryManagementIT][inventoryit] — v8MigrationPreservesAllExistingMovementTypesAndAcceptsBothAdjustmentSigns | V7→V8 giữ nguyên4 loại entry cũ và stock, cho phép delta âm/dương mới. |
+| [ApiDocumentationIT][apidocit] — stockAdjustmentDocumentsSignedDeltaBoundsReasonErrorsAndBearerSecurity | Spec endpoint, DTO, signed INTEGER bounds, zero rule, reason max500, bearer/errors và đủ5 enum type. |
+
+Hai test rollback parameterized hiện có cũng chạy MANUAL_ADJUSTMENT: movementInsertFailureRollsBackStockProductAndOrder gây lỗi INSERT journal, stockUpdateFailureRollsBackMovementInserts gây lỗi UPDATE stock sau journal INSERT. Cả hai kiểm tra state DB sau transaction thất bại; unit mock không thay thế bằng chứng này. databaseRejectsUnbalancedWrongSignMissingReferenceAndDuplicateMovements còn kiểm tra CHECK mới từ SQL trực tiếp: delta0/order reference/reason sai/stock âm/overflow/type lạ bị từ chối. Các concurrency test kiểm tra interleaving có điều khiển, không phải stress test exhaustive. Căn cứ: [InventoryManagementIT][inventoryit].
 
 ## Bản đồ source để mở nhanh khi luyện nói
 
@@ -1438,6 +1480,12 @@ InventoryManagementIT cập nhật payload stock bị400 và giữ FK/history as
 [authenticatedbase]: src/test/java/com/example/ordermanagement/support/AuthenticatedIntegrationTest.java
 [jwtfixture]: src/test/java/com/example/ordermanagement/support/JwtTestProperties.java
 [testsecurity]: src/test/java/com/example/ordermanagement/support/TestSecurity.java
+
+[adjustdomaintest]: src/test/java/com/example/ordermanagement/product/ProductStockAdjustmentTest.java
+
+[adjustrequest]: src/main/java/com/example/ordermanagement/inventory/AdjustStockRequest.java
+
+[adjustschema]: src/main/resources/db/migration/V8__manual_stock_adjustments.sql
 
 [adminproducts]: src/main/java/com/example/ordermanagement/product/AdminProductController.java
 
