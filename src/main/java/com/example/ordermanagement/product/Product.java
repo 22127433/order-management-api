@@ -35,20 +35,23 @@ public class Product {
     protected Product() { }
 
     public Product(String name, String description, BigDecimal price, int stockQuantity) {
-        update(name, description, price, stockQuantity);
-    }
-
-    public void update(String name, String description, BigDecimal price, int stockQuantity) {
-        if (name == null || name.isBlank() || name.length() > 120
-                || (description != null && description.length() > 2000)
-                || price == null || price.signum() <= 0 || price.precision() - price.scale() > 12
-                || stockQuantity < 0) {
+        if (stockQuantity < 0) {
             throw new IllegalArgumentException("Invalid product data");
         }
+        updateMetadata(name, description, price);
+        this.stockQuantity = stockQuantity;
+    }
+
+    public void updateMetadata(String name, String description, BigDecimal price) {
+        if (name == null || name.isBlank() || name.length() > 120
+                || (description != null && description.length() > 2000)
+                || price == null || price.signum() <= 0 || price.precision() - price.scale() > 12) {
+            throw new IllegalArgumentException("Invalid product data");
+        }
+        BigDecimal normalizedPrice = price.setScale(2, RoundingMode.UNNECESSARY);
         this.name = name.strip();
         this.description = description;
-        this.price = price.setScale(2, RoundingMode.UNNECESSARY);
-        this.stockQuantity = stockQuantity;
+        this.price = normalizedPrice;
     }
 
     public void ensureStockAvailable(int quantity) {

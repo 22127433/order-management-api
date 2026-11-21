@@ -216,12 +216,12 @@ class InventoryManagementIT extends com.example.ordermanagement.support.Authenti
     }
 
     @Test
-    void putCannotBypassJournalAndForeignKeysPreserveHistory() throws Exception {
+    void putRejectsStockFieldsAndForeignKeysPreserveHistory() throws Exception {
         ProductResponse product = product(10);
         var before = history(product.id());
         mvc.perform(put("/api/products/{id}", product.id()).contentType(MediaType.APPLICATION_JSON)
                         .content("{\"name\":\"Changed\",\"price\":1,\"stockQuantity\":5}"))
-                .andExpect(status().isConflict());
+                .andExpect(status().isBadRequest());
         assertThat(products.getById(product.id()).stockQuantity()).isEqualTo(10);
         assertThat(history(product.id())).isEqualTo(before);
         assertThatThrownBy(() -> products.delete(product.id())).isInstanceOf(ConflictException.class);

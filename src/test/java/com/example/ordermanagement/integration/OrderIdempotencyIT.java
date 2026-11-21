@@ -13,6 +13,7 @@ import com.example.ordermanagement.order.IdempotentOrderService;
 import com.example.ordermanagement.order.OrderService;
 import com.example.ordermanagement.order.OrderStatus;
 import com.example.ordermanagement.product.ProductRequest;
+import com.example.ordermanagement.product.UpdateProductRequest;
 import com.example.ordermanagement.product.ProductService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.math.BigDecimal;
@@ -89,7 +90,7 @@ class OrderIdempotencyIT extends com.example.ordermanagement.support.Authenticat
                         .contentType(MediaType.APPLICATION_JSON).content(request))
                 .andExpect(status().isCreated()).andReturn().getResponse().getContentAsString();
         orders.cancel(mapper.readTree(first).get("id").asLong());
-        products.update(productId, new ProductRequest("Updated", null, new BigDecimal("9.99"), 10));
+        products.update(productId, new UpdateProductRequest("Updated", null, new BigDecimal("9.99")));
         String retry = mvc.perform(post("/api/orders").header("Idempotency-Key", "retry")
                         .contentType(MediaType.APPLICATION_JSON).content(request))
                 .andExpect(status().isOk()).andExpect(header().string("Idempotency-Replayed", "true"))

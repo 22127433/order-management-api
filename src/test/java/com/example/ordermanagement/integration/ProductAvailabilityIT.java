@@ -19,6 +19,7 @@ import com.example.ordermanagement.order.OrderStatus;
 import com.example.ordermanagement.product.ProductAvailabilityRequest;
 import com.example.ordermanagement.product.ProductRequest;
 import com.example.ordermanagement.product.ProductService;
+import com.example.ordermanagement.product.UpdateProductRequest;
 import com.example.ordermanagement.security.TokenService;
 import com.example.ordermanagement.support.AuthenticatedIntegrationTest;
 import com.example.ordermanagement.support.TestSecurity;
@@ -170,7 +171,7 @@ class ProductAvailabilityIT extends AuthenticatedIntegrationTest {
     @Test
     void adminsCanUpdateRestockAndReadHistoryWithoutReactivatingProduct() {
         setActive(false);
-        assertThat(products.update(productId, new ProductRequest("Renamed", null, BigDecimal.TEN, 10)).active()).isFalse();
+        assertThat(products.update(productId, new UpdateProductRequest("Renamed", null, BigDecimal.TEN)).active()).isFalse();
         assertThat(products.restock(productId, new RestockRequest(3, "Warehouse delivery")).active()).isFalse();
         assertThat(stock()).isEqualTo(13);
         assertThat(movements()).isEqualTo(2);

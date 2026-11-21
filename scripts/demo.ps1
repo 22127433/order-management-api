@@ -65,7 +65,7 @@ $mouse = (Invoke-DemoRequest POST '/api/products' @{
 } 201).Body
 $catalog = (Invoke-DemoRequest GET '/api/products?keyword=keyboard&minPrice=10&maxPrice=100&inStock=true&page=0&size=5&sort=price,asc').Body
 $null = Invoke-DemoRequest PUT "/api/products/$($keyboard.id)" @{
-    name = $keyboard.name; description = 'Metadata updated by local demo'; price = 59.90; stockQuantity = 20
+    name = $keyboard.name; description = 'Metadata updated by local demo'; price = 59.90
 }
 
 $demoKey = 'demo-' + [guid]::NewGuid().ToString()
@@ -78,6 +78,10 @@ if ($created.Body.id -ne $retry.Body.id -or $retry.Headers['Idempotency-Replayed
 $null = Invoke-DemoRequest POST '/api/orders' @{ items = @(@{ productId = $keyboard.id; quantity = 1 }) } 409 $demoKey $demoCustomerToken
 $afterOrder = (Invoke-DemoRequest GET "/api/products/$($keyboard.id)").Body
 if ($afterOrder.stockQuantity -ne 18) { throw 'Expected stock 18 after keyed creation and retry.' }
+$metadataUpdated = (Invoke-DemoRequest PUT "/api/products/$($keyboard.id)" @{
+    name = $keyboard.name; description = 'Metadata updated after ordering'; price = 59.90
+}).Body
+if ($metadataUpdated.stockQuantity -ne 18) { throw 'Metadata PUT must preserve stock after ordering.' }
 $null = Invoke-DemoRequest GET "/api/orders/$($created.Body.id)" -AccessToken $demoCustomerToken
 $null = Invoke-DemoRequest POST "/api/orders/$($created.Body.id)/cancel"
 $cancelReplay = (Invoke-DemoRequest POST '/api/orders' $orderBody 200 $demoKey $demoCustomerToken).Body

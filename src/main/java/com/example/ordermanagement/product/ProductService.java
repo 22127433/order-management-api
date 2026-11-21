@@ -74,12 +74,9 @@ public class ProductService {
 
     @Transactional
     @PreAuthorize("hasRole('ADMIN')")
-    public ProductResponse update(Long id, ProductRequest request) {
+    public ProductResponse update(Long id, UpdateProductRequest request) {
         Product product = findForUpdate(id);
-        if (request.stockQuantity() == null || request.stockQuantity() != product.getStockQuantity()) {
-            throw new ConflictException("Product PUT must keep stockQuantity unchanged; use the restock endpoint to add stock");
-        }
-        product.update(request.name(), request.description(), request.price(), request.stockQuantity());
+        product.updateMetadata(request.name(), request.description(), request.price());
         return ProductResponse.from(product);
     }
 

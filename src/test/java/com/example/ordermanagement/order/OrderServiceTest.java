@@ -297,7 +297,7 @@ class OrderServiceTest {
         CustomerOrder order = CustomerOrder.create(TestSecurity.user(1L));
         order.addItem(product, 3);
         when(orderRepository.findById(1L)).thenReturn(Optional.of(order));
-        product.update("Updated", null, new BigDecimal("100.00"), 7);
+        product.updateMetadata("Updated", null, new BigDecimal("100.00"));
 
         OrderResponse response = service.getById(1L);
 

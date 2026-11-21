@@ -101,7 +101,7 @@ class ProductServiceTest {
     void updatesLockedProduct() {
         Product product = product();
         when(repository.findByIdForUpdate(1L)).thenReturn(Optional.of(product));
-        ProductResponse result = service.update(1L, new ProductRequest("Keyboard", "Mechanical", new BigDecimal("29.99"), 1));
+        ProductResponse result = service.update(1L, new UpdateProductRequest("Keyboard", "Mechanical", new BigDecimal("29.99")));
         assertThat(result.stockQuantity()).isEqualTo(1);
         assertThat(result.name()).isEqualTo("Keyboard");
         verify(repository).findByIdForUpdate(1L);
@@ -109,12 +109,15 @@ class ProductServiceTest {
     }
 
     @Test
-    void refusesDirectStockReplacementThroughPut() {
+    void metadataUpdatePreservesStockChangedByOrderAndInactiveFlag() {
         Product product = product();
+        product.deductStock(1);
+        product.changeAvailability(false);
         when(repository.findByIdForUpdate(1L)).thenReturn(Optional.of(product));
-        assertThatThrownBy(() -> service.update(1L, request())).isInstanceOf(ConflictException.class);
-        assertThat(product.getStockQuantity()).isEqualTo(1);
-        assertThat(product.getName()).isEqualTo("Old");
+        ProductResponse response = service.update(1L, new UpdateProductRequest("Updated", null, new BigDecimal("2.00")));
+        assertThat(response.stockQuantity()).isZero();
+        assertThat(response.active()).isFalse();
+        assertThat(response.name()).isEqualTo("Updated");
         verifyNoInteractions(stockMovementRepository);
     }
 
@@ -210,7 +213,8 @@ class ProductServiceTest {
         when(repository.findByIdAndActiveTrue(1L)).thenReturn(Optional.empty());
         when(repository.findByIdForUpdate(1L)).thenReturn(Optional.empty());
         assertThatThrownBy(() -> service.getById(1L)).isInstanceOf(ResourceNotFoundException.class);
-        assertThatThrownBy(() -> service.update(1L, request())).isInstanceOf(ResourceNotFoundException.class);
+        assertThatThrownBy(() -> service.update(1L, new UpdateProductRequest("Updated", null, BigDecimal.ONE)))
+                .isInstanceOf(ResourceNotFoundException.class);
         assertThatThrownBy(() -> service.delete(1L)).isInstanceOf(ResourceNotFoundException.class);
         assertThatThrownBy(() -> service.restock(1L, new RestockRequest(1, "Delivery")))
                 .isInstanceOf(ResourceNotFoundException.class);

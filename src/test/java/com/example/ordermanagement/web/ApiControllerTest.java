@@ -31,6 +31,7 @@ import com.example.ordermanagement.product.ProductController;
 import com.example.ordermanagement.product.ProductResponse;
 import com.example.ordermanagement.product.ProductSearchQuery;
 import com.example.ordermanagement.product.ProductService;
+import com.example.ordermanagement.product.UpdateProductRequest;
 import java.math.BigDecimal;
 import java.time.Instant;
 import java.util.List;
@@ -55,6 +56,9 @@ class ApiControllerTest {
     private static final String PRODUCT = """
             {"name":"Keyboard","description":"Mechanical","price":29.99,"stockQuantity":10}
             """;
+    private static final String METADATA = """
+            {"name":"Keyboard","description":"Mechanical","price":29.99}
+            """;
     @Autowired private MockMvc mvc;
     @MockitoBean private ProductService productService;
     @MockitoBean private OrderService orderService;
@@ -75,10 +79,48 @@ class ApiControllerTest {
         when(productService.findAll(new ProductSearchQuery(null, null, null, null, 0, 20, "id,asc")))
                 .thenReturn(new PageResponse<>(List.of(product()), 0, 20, 1, 1, true));
         mvc.perform(get("/api/products/1")).andExpect(status().isOk()).andExpect(jsonPath("$.name").value("Keyboard"));
-        mvc.perform(put("/api/products/1").contentType(MediaType.APPLICATION_JSON).content(PRODUCT))
+        mvc.perform(put("/api/products/1").contentType(MediaType.APPLICATION_JSON).content(METADATA))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.stockQuantity").value(10));
         mvc.perform(get("/api/products")).andExpect(status().isOk())
                 .andExpect(jsonPath("$.content[0].id").value(1)).andExpect(jsonPath("$.totalElements").value(1));
+    }
+
+    @Test
+    void metadataPutDoesNotRequireStockAndBindsDedicatedDto() throws Exception {
+        when(productService.update(1L, new UpdateProductRequest("Keyboard", null, new BigDecimal("29.99")))).thenReturn(product());
+        mvc.perform(put("/api/products/1").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"Keyboard\",\"price\":29.99}"))
+                .andExpect(status().isOk()).andExpect(jsonPath("$.stockQuantity").value(10));
+        verify(productService).update(1L, new UpdateProductRequest("Keyboard", null, new BigDecimal("29.99")));
+    }
+
+    @ParameterizedTest
+    @ValueSource(ints = {0, 10})
+    void putStockFieldIsUnknownEvenWhenItMatchesCurrentStock(int stock) throws Exception {
+        mvc.perform(put("/api/products/1").contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"Keyboard\",\"price\":29.99,\"stockQuantity\":" + stock + "}"))
+                .andExpect(status().isBadRequest()).andExpect(jsonPath("$.status").value(400));
+        verifyNoInteractions(productService);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"{}", "{\"name\":\" \",\"price\":1}", "{\"name\":\"X\",\"price\":null}",
+            "{\"name\":\"X\",\"price\":0}", "{\"name\":\"X\",\"price\":-1}", "{\"name\":\"X\",\"price\":1.001}",
+            "{\"name\":\"X\",\"price\":1000000000000}", "{\"name\":\"X\",\"price\":1,\"active\":false}"})
+    void invalidMetadataPutReturns400BeforeService(String body) throws Exception {
+        mvc.perform(put("/api/products/1").contentType(MediaType.APPLICATION_JSON).content(body))
+                .andExpect(status().isBadRequest());
+        verifyNoInteractions(productService);
+    }
+
+    @Test
+    void metadataPutRetainsNameAndDescriptionLengthLimits() throws Exception {
+        for (String body : List.of("{\"name\":\"" + "x".repeat(121) + "\",\"price\":1}",
+                "{\"name\":\"X\",\"description\":\"" + "x".repeat(2001) + "\",\"price\":1}")) {
+            mvc.perform(put("/api/products/1").contentType(MediaType.APPLICATION_JSON).content(body))
+                    .andExpect(status().isBadRequest());
+        }
+        verifyNoInteractions(productService);
     }
 
     @Test
@@ -264,7 +306,7 @@ class ApiControllerTest {
     @Test
     void foreignKeyConflictReturns409WithoutSqlDetails() throws Exception {
         when(productService.update(any(), any())).thenThrow(new DataIntegrityViolationException("internal SQL"));
-        mvc.perform(put("/api/products/1").contentType(MediaType.APPLICATION_JSON).content(PRODUCT))
+        mvc.perform(put("/api/products/1").contentType(MediaType.APPLICATION_JSON).content(METADATA))
                 .andExpect(status().isConflict())
                 .andExpect(jsonPath("$.message").value("Operation conflicts with existing data"));
     }

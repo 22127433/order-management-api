@@ -99,7 +99,7 @@ Base URL: `http://localhost:8080`. JSON bodies. Supply `Authorization: Bearer <a
 | GET | `/api/products` | Public | 200, page |
 | GET | `/api/products/{id}` | Public | 200 |
 | POST | `/api/products` | ADMIN | 201 + Location |
-| PUT | `/api/products/{id}` | ADMIN; keep current stock unchanged | 200 |
+| PUT | `/api/products/{id}` | ADMIN; replace metadata only | 200 |
 | DELETE | `/api/products/{id}` | ADMIN; no order/movement references | 204, empty body |
 | POST | `/api/products/{id}/restock` | ADMIN | 200 |
 | PATCH | `/api/products/{id}/availability` | ADMIN; set active, no stock change | 200 |
@@ -114,6 +114,22 @@ Base URL: `http://localhost:8080`. JSON bodies. Supply `Authorization: Bearer <a
 | POST | `/api/orders/{id}/cancel` | ADMIN; CREATED -> CANCELLED | 200 |
 
 Customer lookups use `findByIdAndUserId`; another customer's order and an absent order both return 404. ADMIN reads any order, including legacy unowned records. HTTP routes and service `@PreAuthorize` checks enforce roles. No client `role` or `userId` can override this: unknown JSON fields are rejected.
+
+### Product metadata updates
+
+POST `/api/products` keeps `ProductRequest` with required initial `stockQuantity`. PUT `/api/products/{id}` uses `UpdateProductRequest` with **only name, description and price**. Name and price are required; omitted/null description clears it. Metadata validation is unchanged: nonblank name <=120, optional description <=2000, price >=0.01 with at most 12 integer/2 fractional digits.
+
+```http
+PUT /api/products/1
+Authorization: Bearer <ADMIN_ACCESS_TOKEN>
+Content-Type: application/json
+
+{"name":"Mechanical Keyboard","description":"Updated USB keyboard","price":64.90}
+```
+
+200 returns the complete `ProductResponse`, including the current `stockQuantity` and `active` flag. Both are preserved by PUT. This intentionally replaces the old contract: **remove stockQuantity from PUT bodies**. Sending it now returns **400**, even if equal to current stock, under the existing `fail-on-unknown-properties=true` rule. `active` is also rejected; use availability PATCH. Use restock for stock additions. POST still requires stockQuantity and creates INITIAL_STOCK.
+
+ProductService retains its write transaction, ADMIN method authorization, and product-row pessimistic lock. The entity constructor and `updateMetadata` share metadata validation; only the constructor sets initial stock. A metadata edit never writes a client stock value or creates an inventory movement. If an Order/restock changes inventory before a waiting PUT obtains the lock, PUT preserves that latest quantity. Orders that already exist retain their original unit-price/subtotal/total snapshots. Concurrent stale metadata edits still follow the existing last-writer behavior; this refactor does not add ETag/version preconditions. No schema migration or new framework is needed.
 
 ### Product availability
 
@@ -172,7 +188,7 @@ Illustrative response for one matching order owned by the caller:
 ### Validation, HTTP status, and errors
 
 - Registration: normalized (trimmed/lowercased) email up to 254 characters; nonblank password 12-72 characters and at most 72 UTF-8 bytes. Passwords are never trimmed. Login validates email, nonblank password, and the same byte ceiling. Duplicate normalized emails return 409, including concurrent inserts.
-- Product: nonblank name <=120, optional description <=2000, price >=0.01 with at most 12 integer/2 fractional digits, stock 0..2147483647. PUT cannot replace stock; changed stock returns 409.
+- Product: nonblank name <=120, optional description <=2000, price >=0.01 with at most 12 integer/2 fractional digits. POST requires initial stock 0..2147483647; PUT accepts metadata only and any stockQuantity field returns 400.
 - Order: 1-100 distinct non-null items, positive product IDs, integer quantity 1..1000000. Prices/totals are server-calculated. Missing products return 404; insufficient stock returns 409.
 - Restock: quantity 1..2147483647, required trimmed reason <=500; resulting stock must fit INTEGER. Successful restock is not idempotent and adds stock again if repeated.
 - Search: optional `keyword` (trimmed, <=120, literal case-insensitive substring), inclusive nonnegative `minPrice`/`maxPrice` with min <= max, `inStock=true` (>0), false (=0), or omitted. All filters combine with AND.
@@ -370,4 +386,4 @@ The [CI workflow](.github/workflows/ci.yml) runs verify -Pintegration on push/PR
 - **Migration compatibility:** Keep legacy owners/receipts NULL and ADMIN-only/archived rather than guessing user ownership. New application-created orders always have an owner. Schema nullability is an explicit compatibility limitation, not a claim that raw SQL obeys authorization. Existing API URLs/body shapes remain, with additive response userId; protected endpoints intentionally require authentication now.
 - **Scope:** One application/database, constructor injection, DTO boundaries, explicit Flyway migrations, and targeted indexes. No extra infrastructure is needed for these portfolio features.
 
-Feature verification on 21 November 2026: Maven Wrapper verify -Pintegration completed with BUILD SUCCESS; 505 cases passed (180 unit, 169 MVC, 156 PostgreSQL integration), with zero failures/errors/skips.
+Feature verification on 21 November 2026: Maven Wrapper verify -Pintegration completed with BUILD SUCCESS; 529 cases passed (188 unit, 181 MVC, 160 PostgreSQL integration), with zero failures/errors/skips.

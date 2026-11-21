@@ -72,7 +72,7 @@ GET {{baseUrl}}/api/products?page=0&size=10
 ### 04. Get Product -> 200
 GET {{baseUrl}}/api/products/{{keyboardId}}
 
-### 05. Update Product -> 200; PUT replaces metadata and must keep current stock unchanged
+### 05. Update Product -> 200; PUT accepts metadata only, without stockQuantity
 # Run before creating the order. Prices remain consistent with the README example.
 PUT {{baseUrl}}/api/products/{{keyboardId}}
 Authorization: Bearer {{adminToken}}
@@ -81,8 +81,7 @@ Content-Type: application/json
 {
   "name": "Mechanical Keyboard",
   "description": "USB keyboard",
-  "price": 59.90,
-  "stockQuantity": 20
+  "price": 59.90
 }
 
 ### 06. Create Order -> 201 + Location; total 139.79; remaining stock 18 / 9
@@ -304,7 +303,7 @@ Content-Type: application/json
 GET {{baseUrl}}/api/products/{{keyboardId}}/stock-movements?sort=quantityDelta,desc
 Authorization: Bearer {{adminToken}}
 
-### 51. Product PUT Cannot Replace Stock -> 409; stock and history remain unchanged
+### 51. Product PUT Rejects Unknown Stock Field -> 400; stock and history remain unchanged
 PUT {{baseUrl}}/api/products/{{keyboardId}}
 Authorization: Bearer {{adminToken}}
 Content-Type: application/json
@@ -536,3 +535,22 @@ Content-Type: application/json
 
 ### 93. Anonymous ADMIN Catalog Request -> 401
 GET {{baseUrl}}/api/admin/products?active=false
+
+### 94. Metadata PUT After Inventory Changes -> 200; no current stock value is needed
+PUT {{baseUrl}}/api/products/{{keyboardId}}
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"name":"Mechanical Keyboard","description":"Metadata edit after inventory changes","price":59.90}
+
+### Read current stock for the following legacy PUT example
+# @name getCurrentProductStock
+GET {{baseUrl}}/api/products/{{keyboardId}}
+
+### 95. PUT Rejects Stock Even If It Equals the Current Value -> 400
+# Run getCurrentProductStock first. The old PUT contract is intentionally rejected.
+PUT {{baseUrl}}/api/products/{{keyboardId}}
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"name":"Mechanical Keyboard","description":"Legacy payload","price":59.90,"stockQuantity":{{getCurrentProductStock.response.body.$.stockQuantity}}}

@@ -1302,6 +1302,38 @@ Các test mới (phân biệt mock với PostgreSQL thật):
 | [ProductAvailabilityIT][availabilityit] — v7MigrationPreservesLegacyProductsOrdersAndMovementsAndDefaultsNewRowsActive | Schema riêng V6→V7, dữ liệu cũ giữ nguyên, mọi product active và default SQL true. |
 | [ApiDocumentationIT][apidocit] — availabilityAndAdminCatalogDocumentValidationSecurityAndPublicVisibility | Spec schema boolean/required, bearer requirement, status, admin active filter, public visibility. Không thay thế authorization runtime test. |
 
+### 8.13. Refactor PUT metadata, tách khỏi initial stock
+
+**Vấn đề:** Trước đây PUT dùng chung ProductRequest với POST nên phải gửi stock hiện tại. Stock có thể đổi do đơn hàng trong lúc người quản trị đang sửa mô tả; việc gửi stock không phục vụ mục tiêu chỉnh metadata. Contract mới tách rõ: ProductRequest cho tạo mới gồm initial stock; UpdateProductRequest chỉ có name/description/price. Căn cứ: [ProductRequest][preq], [UpdateProductRequest][updaterequest], [ProductController.update][pc].
+
+**Trace:** PUT nhận DTO mới @Valid → ProductService.update giữ @PreAuthorize ADMIN và @Transactional → findForUpdate lấy PESSIMISTIC_WRITE như cũ → Product.updateMetadata → DTO response. Không còn so sánh hoặc nhận stock từ request. Response vẫn có stock/active hiện tại; mô tả bỏ qua/null sẽ được xóa. Gửi stockQuantity/active trả400 theo Jackson fail-on-unknown-properties, kể cả stock bằng hiện tại. Đây là thay đổi contract có chủ đích, không giữ overload service chấp nhận DTO cũ. [ProductService][ps], [Product][product], [application.yml][config].
+
+**Validation và constructor:** Constructor kiểm tra stock ban đầu không âm, gọi updateMetadata để dùng chung validation metadata, rồi gán initial stock. Domain kiểm tra name/description/price như trước; price được normalize scale2 trước khi gán các field để lỗi precision không để object thay đổi một phần. Bean Validation của DTO mới giữ các giới hạn cũ. Không cần migration hay dependency mới. [Product][product], [UpdateProductRequest][updaterequest], [ProductMetadataTest][metadatatest].
+
+**Concurrency:** Không có client stock không có nghĩa bỏ được khóa. Hibernate có thể UPDATE nhiều cột của managed entity; service vẫn khóa/read Product state hiện tại trước sửa. Nếu Order commit trước, PUT chờ rồi giữ stock đã trừ; nếu PUT commit trước, Order chờ rồi mua theo giá mới. Restock commit trước cũng được giữ nguyên stock/journal khi PUT tiếp tục. Giá order đã mua nằm trong OrderItem và không đổi theo catalog. Ba test quan sát pg_stat_activity Lock trước khi giải phóng transaction đầu; không chỉ bắt đầu hai thread gần nhau rồi suy ra overlap. [OrderManagementIT][it], [ProductService][ps], [OrderItem][item].
+
+**Trả lời phỏng vấn:** “Em tách DTO vì tạo Product cần stock ban đầu, còn sửa metadata không cần biết stock. Entity có updateMetadata dùng chung kiểm tra với constructor; update không còn đường gán stock. Em giữ transaction và row lock để không ghi đè state mới khi có Order/restock đồng thời. Unknown field stock trong PUT trả400 và tài liệu/demo được đổi theo contract. Integration test kiểm tra cả hai thứ tự lấy khóa, stock cuối, movement và price snapshot cũ.” [UpdateProductRequest][updaterequest], [ProductService][ps], [OrderManagementIT][it].
+
+Các test mới/cập nhật quan trọng:
+
+| Class/method | Bằng chứng / giới hạn |
+| --- | --- |
+| [ProductMetadataTest][metadatatest] — constructorUsesMetadataNormalizationAndKeepsInitialStock | Constructor trim name/normalize price, giữ initial stock/active mặc định. Unit object Java. |
+| [ProductMetadataTest][metadatatest] — constructorStillRejectsNegativeInitialStock | Không phá guard initial stock khi tách domain method. |
+| [ProductMetadataTest][metadatatest] — metadataChangesPreserveStockAfterInventoryOperationsAndInactiveFlag | Deduct/restore trước rồi sửa metadata; stock/active không đổi. |
+| [ProductMetadataTest][metadatatest] — invalidPriceLeavesMetadataAndStockUnchanged | Null/âm/zero/quá integer digits bị chặn và giữ state cũ. |
+| [ProductMetadataTest][metadatatest] — invalidFractionalPrecisionDoesNotPartiallyReplaceMetadata | ArithmeticException do scale không làm đổi name/description trước khi lỗi. |
+| [ApiControllerTest][webtest] — metadataPutDoesNotRequireStockAndBindsDedicatedDto | PUT không có stock200; service mock nhận UpdateProductRequest, description omitted=null. |
+| [ApiControllerTest][webtest] — putStockFieldIsUnknownEvenWhenItMatchesCurrentStock | Stock khác/bằng hiện tại đều400 trước service; không còn contract409 guard stock. |
+| [ApiControllerTest][webtest] — invalidMetadataPutReturns400BeforeService | Required/name/price/digits và unknown active giữ400. |
+| [ApiControllerTest][webtest] — metadataPutRetainsNameAndDescriptionLengthLimits | Name121/description2001 ký tự400. |
+| [OrderManagementIT][it] — orderCommitsBeforeWaitingMetadataPutWithoutStockOverwriteOrSnapshotChange | Order lấy lock trước; PUT thật sự chờ; stock7, catalog99.99 nhưng order vẫn0.30/unit0.10, chỉ initial+deduction movement. |
+| [OrderManagementIT][it] — metadataPutCommitsBeforeWaitingOrderAndNewPriceIsUsedWithoutStockOverwrite | PUT lấy lock trước; order chờ và dùng giá2.50 mới, stock7/movement đúng. |
+| [OrderManagementIT][it] — restockCommitsBeforeWaitingMetadataUpdateWithoutJournalOverwrite | Restock giữ lock trước; PUT chờ rồi giữ stock15, MANUAL_RESTOCK before10/after15, không thêm movement. |
+| [ApiDocumentationIT][apidocit] — metadataPutHasDedicatedSchemaWithoutStockAndCreationStillRequiresInitialStock | Spec POST→ProductRequest có stock bắt buộc; PUT→UpdateProductRequest đúng ba field/validation và giải thích400. |
+
+InventoryManagementIT cập nhật payload stock bị400 và giữ FK/history assertions. ProductAvailabilityIT, OrderIdempotencyIT và test snapshot dùng DTO mới; OrderServiceTest gọi updateMetadata thay method nhận stock cũ. Demo script gửi metadata-only PUT cả trước/sau order và assert stock18 không bị reset. Mock unit/MVC không chứng minh các row-lock outcome; phần đó nằm ở PostgreSQL IT. [InventoryManagementIT][inventoryit], [ProductAvailabilityIT][availabilityit], [OrderIdempotencyIT][idemit], [demo.ps1][demoscript].
+
 ## Bản đồ source để mở nhanh khi luyện nói
 
 | Muốn chứng minh điều gì? | Mở file/method |
@@ -1428,3 +1460,7 @@ Các test mới (phân biệt mock với PostgreSQL thật):
 [listspec]: src/main/java/com/example/ordermanagement/order/OrderSpecifications.java
 
 [listsummary]: src/main/java/com/example/ordermanagement/order/OrderSummaryResponse.java
+
+[metadatatest]: src/test/java/com/example/ordermanagement/product/ProductMetadataTest.java
+
+[updaterequest]: src/main/java/com/example/ordermanagement/product/UpdateProductRequest.java

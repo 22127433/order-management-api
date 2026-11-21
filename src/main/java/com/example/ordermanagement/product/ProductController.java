@@ -105,12 +105,13 @@ public class ProductController {
     }
 
     @PutMapping("/{id}")
-    @Operation(tags = "Products", summary = "Replace product metadata", description = "ADMIN only. Requires the current stockQuantity unchanged; "
-            + "a different stock value returns 409. Use restock to add inventory. Existing order price snapshots are preserved.")
+    @Operation(tags = "Products", summary = "Replace product metadata", description = "ADMIN only. Accepts name, description and price only. "
+            + "stockQuantity and active are unknown fields and return 400, even if unchanged. Locks the product; stock and availability are preserved. "
+            + "Use restock to add inventory, availability PATCH to change sale status. Existing order price snapshots are preserved.")
     @ApiResponse(responseCode = "200", description = "Updated product", useReturnTypeSchema = true)
     @ApiResponse(responseCode = "404", ref = "#/components/responses/NotFound")
     @ApiResponse(responseCode = "409", ref = "#/components/responses/Conflict")
-    public ProductResponse update(@PathVariable @Positive Long id, @Valid @RequestBody ProductRequest request) {
+    public ProductResponse update(@PathVariable @Positive Long id, @Valid @RequestBody UpdateProductRequest request) {
         return productService.update(id, request);
     }
 

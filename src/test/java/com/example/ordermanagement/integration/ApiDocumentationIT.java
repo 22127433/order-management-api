@@ -154,6 +154,27 @@ class ApiDocumentationIT extends com.example.ordermanagement.support.JwtTestProp
     }
 
     @Test
+    void metadataPutHasDedicatedSchemaWithoutStockAndCreationStillRequiresInitialStock() {
+        JsonNode spec = specification();
+        JsonNode create = spec.path("paths").path("/api/products").path("post");
+        JsonNode update = spec.path("paths").path("/api/products/{id}").path("put");
+        String schemaPath = "/requestBody/content/application~1json/schema/$ref";
+        assertThat(create.at(schemaPath).asText()).isEqualTo("#/components/schemas/ProductRequest");
+        assertThat(update.at(schemaPath).asText()).isEqualTo("#/components/schemas/UpdateProductRequest");
+        JsonNode schemas = spec.at("/components/schemas");
+        assertThat(schemas.path("ProductRequest").path("required").toString()).contains("stockQuantity");
+        JsonNode metadata = schemas.path("UpdateProductRequest");
+        assertThat(metadata.path("properties").size()).isEqualTo(3);
+        assertThat(metadata.path("properties").has("stockQuantity")).isFalse();
+        assertThat(metadata.path("properties").has("active")).isFalse();
+        assertThat(metadata.path("required").toString()).contains("name", "price").doesNotContain("stockQuantity");
+        assertThat(metadata.at("/properties/name/maxLength").asInt()).isEqualTo(120);
+        assertThat(metadata.at("/properties/description/maxLength").asInt()).isEqualTo(2000);
+        assertThat(metadata.at("/properties/price/minimum").decimalValue()).isEqualByComparingTo("0.01");
+        assertThat(update.path("description").asText()).contains("unknown fields", "400", "stock and availability are preserved");
+    }
+
+    @Test
     void documentationIncludesValidationPaginationLifecycleAndSharedErrorSchemas() {
         JsonNode spec = specification();
         JsonNode schemas = spec.at("/components/schemas");

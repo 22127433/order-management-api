@@ -21,6 +21,8 @@ import com.example.ordermanagement.order.OrderStatus;
 import com.example.ordermanagement.product.ProductRequest;
 import com.example.ordermanagement.product.ProductResponse;
 import com.example.ordermanagement.product.ProductService;
+import com.example.ordermanagement.product.UpdateProductRequest;
+import com.example.ordermanagement.inventory.RestockRequest;
 import java.math.BigDecimal;
 import java.util.List;
 import java.util.concurrent.Callable;
@@ -178,7 +180,7 @@ class OrderManagementIT extends com.example.ordermanagement.support.Authenticate
     void preservesPricesAndProtectsOrderHistoryAfterCancellation() {
         ProductResponse product = product("0.10", 10);
         OrderResponse created = orderService.create(request(product.id(), 3));
-        productService.update(product.id(), new ProductRequest("New price", null, new BigDecimal("99.99"), 7));
+        productService.update(product.id(), new UpdateProductRequest("New price", null, new BigDecimal("99.99")));
         OrderResponse loaded = orderService.getById(created.id());
         assertThat(loaded.totalAmount()).isEqualByComparingTo("0.30");
         assertThat(loaded.items().getFirst().unitPrice()).isEqualByComparingTo("0.10");
@@ -240,7 +242,7 @@ class OrderManagementIT extends com.example.ordermanagement.support.Authenticate
                 .andExpect(jsonPath("$.totalElements").value(1))
                 .andExpect(jsonPath("$.size").value(1));
         mvc.perform(put("/api/products/{id}", id).contentType(MediaType.APPLICATION_JSON).content("""
-                {"name":"Updated","description":null,"price":12.50,"stockQuantity":10}
+                {"name":"Updated","description":null,"price":12.50}
                 """))
                 .andExpect(status().isOk()).andExpect(jsonPath("$.price").value(12.50));
         assertThat(productService.getById(id).stockQuantity()).isEqualTo(10);
@@ -252,7 +254,8 @@ class OrderManagementIT extends com.example.ordermanagement.support.Authenticate
         mvc.perform(delete("/api/products/{id}", legacyId)).andExpect(status().isNoContent())
                 .andExpect(content().string(""));
         mvc.perform(get("/api/products/{id}", legacyId)).andExpect(status().isNotFound());
-        mvc.perform(put("/api/products/{id}", legacyId).contentType(MediaType.APPLICATION_JSON).content(body))
+        mvc.perform(put("/api/products/{id}", legacyId).contentType(MediaType.APPLICATION_JSON)
+                        .content("{\"name\":\"Updated\",\"description\":null,\"price\":12.50}"))
                 .andExpect(status().isNotFound());
         mvc.perform(delete("/api/products/{id}", legacyId)).andExpect(status().isNotFound());
     }
@@ -556,6 +559,59 @@ class OrderManagementIT extends com.example.ordermanagement.support.Authenticate
     private void allowStockUpdates() {
         jdbc.execute("DROP TRIGGER IF EXISTS test_reject_stock_update ON products");
         jdbc.execute("DROP FUNCTION IF EXISTS test_reject_stock_update()");
+    }
+
+    @Test
+    void orderCommitsBeforeWaitingMetadataPutWithoutStockOverwriteOrSnapshotChange() throws Exception {
+        ProductResponse product = product("0.10", 10);
+        assertThat(overlapTransactions(() -> {
+            orderService.create(request(product.id(), 3));
+            return true;
+        }, () -> {
+            assertThat(productService.update(product.id(), new UpdateProductRequest("Renamed", null, new BigDecimal("99.99")))
+                    .stockQuantity()).isEqualTo(7);
+            return true;
+        }, "products")).containsExactly(true, true);
+        ProductResponse updated = productService.getById(product.id());
+        assertThat(updated.stockQuantity()).isEqualTo(7);
+        assertThat(updated.name()).isEqualTo("Renamed");
+        assertThat(updated.price()).isEqualByComparingTo("99.99");
+        OrderResponse order = orderService.getById(jdbc.queryForObject("SELECT id FROM customer_orders", Long.class));
+        assertThat(order.totalAmount()).isEqualByComparingTo("0.30");
+        assertThat(order.items().getFirst().unitPrice()).isEqualByComparingTo("0.10");
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM stock_movements", Long.class)).isEqualTo(2);
+    }
+
+    @Test
+    void metadataPutCommitsBeforeWaitingOrderAndNewPriceIsUsedWithoutStockOverwrite() throws Exception {
+        ProductResponse product = product("1.00", 10);
+        assertThat(overlapTransactions(() -> {
+            productService.update(product.id(), new UpdateProductRequest("Renamed", null, new BigDecimal("2.50")));
+            return true;
+        }, () -> {
+            assertThat(orderService.create(request(product.id(), 3)).totalAmount()).isEqualByComparingTo("7.50");
+            return true;
+        }, "products")).containsExactly(true, true);
+        assertThat(productService.getById(product.id()).stockQuantity()).isEqualTo(7);
+        assertThat(productService.getById(product.id()).price()).isEqualByComparingTo("2.50");
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM stock_movements", Long.class)).isEqualTo(2);
+    }
+
+    @Test
+    void restockCommitsBeforeWaitingMetadataUpdateWithoutJournalOverwrite() throws Exception {
+        ProductResponse product = product("1.00", 10);
+        assertThat(overlapTransactions(() -> {
+            productService.restock(product.id(), new RestockRequest(5, "Supplier delivery"));
+            return true;
+        }, () -> {
+            assertThat(productService.update(product.id(), new UpdateProductRequest("Renamed", null, BigDecimal.TEN))
+                    .stockQuantity()).isEqualTo(15);
+            return true;
+        }, "products")).containsExactly(true, true);
+        assertThat(productService.getById(product.id()).stockQuantity()).isEqualTo(15);
+        assertThat(jdbc.queryForObject("SELECT count(*) FROM stock_movements", Long.class)).isEqualTo(2);
+        assertThat(jdbc.queryForObject("SELECT stock_before FROM stock_movements WHERE movement_type='MANUAL_RESTOCK'", Integer.class)).isEqualTo(10);
+        assertThat(jdbc.queryForObject("SELECT stock_after FROM stock_movements WHERE movement_type='MANUAL_RESTOCK'", Integer.class)).isEqualTo(15);
     }
 
     private ProductResponse product(String price, int stock) {

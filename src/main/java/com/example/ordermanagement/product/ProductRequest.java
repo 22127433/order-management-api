@@ -9,7 +9,7 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Size;
 import java.math.BigDecimal;
 
-@Schema(description = "Product creation or metadata replacement. PUT must keep stock equal to its current value.")
+@Schema(description = "Product creation with initial inventory. PUT uses UpdateProductRequest instead.")
 public record ProductRequest(
         @Schema(example = "Mechanical Keyboard", minLength = 1, description = "Required nonblank name")
         @NotBlank @Size(max = 120) String name,
@@ -18,5 +18,5 @@ public record ProductRequest(
         @Schema(example = "59.90", minimum = "0.01", maximum = "999999999999.99", multipleOf = 0.01,
                 description = "Positive decimal; at most 12 integer digits and 2 fractional digits")
         @NotNull @DecimalMin("0.01") @Digits(integer = 12, fraction = 2) BigDecimal price,
-        @Schema(example = "20", maximum = "2147483647", description = "Initial stock on POST; unchanged current stock on PUT")
+        @Schema(example = "20", maximum = "2147483647", description = "Initial stock on POST only")
         @NotNull @Min(0) Integer stockQuantity) { }
