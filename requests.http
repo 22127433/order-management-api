@@ -464,3 +464,75 @@ Authorization: Bearer {{customerToken}}
 # Run loginOtherCustomer first. Empty content is valid when this second account has no orders.
 GET {{baseUrl}}/api/orders
 Authorization: Bearer {{loginOtherCustomer.response.body.$.accessToken}}
+
+### 80. ADMIN Deactivate Product -> 200; stock and movements unchanged
+PATCH {{baseUrl}}/api/products/{{keyboardId}}/availability
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"active":false}
+
+### 81. Repeat Deactivation -> 200; no duplicate stock or history write
+PATCH {{baseUrl}}/api/products/{{keyboardId}}/availability
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"active":false}
+
+### 82. Public Product Detail Is Hidden -> 404, even for ADMIN on this public route
+GET {{baseUrl}}/api/products/{{keyboardId}}
+
+### 83. Public Search Cannot Select Inactive Products -> 200, active records only
+GET {{baseUrl}}/api/products?active=false&keyword=keyboard
+
+### 84. ADMIN Find Inactive Products -> 200 with active=false in each result
+GET {{baseUrl}}/api/admin/products?active=false&keyword=keyboard&page=0&size=20&sort=id,asc
+Authorization: Bearer {{adminToken}}
+
+### 85. ADMIN Catalog Without Active Filter -> 200, active and inactive products
+GET {{baseUrl}}/api/admin/products?page=0&size=20
+Authorization: Bearer {{adminToken}}
+
+### 86. Inactive Product Cannot Be Purchased -> 409; no stock/order/receipt write
+# After request 90 reactivates it, retry this same key/body to create the order.
+POST {{baseUrl}}/api/orders
+Authorization: Bearer {{customerToken}}
+Idempotency-Key: availability-retry-{{keyboardId}}
+Content-Type: application/json
+
+{"items":[{"productId":{{keyboardId}},"quantity":1}]}
+
+### 87. Existing Order Remains Readable After Product Deactivation -> 200
+GET {{baseUrl}}/api/orders/{{orderId}}
+Authorization: Bearer {{customerToken}}
+
+### 88. CUSTOMER Cannot Change Availability -> 403
+PATCH {{baseUrl}}/api/products/{{keyboardId}}/availability
+Authorization: Bearer {{customerToken}}
+Content-Type: application/json
+
+{"active":true}
+
+### 89. CUSTOMER Cannot Read ADMIN Catalog -> 403
+GET {{baseUrl}}/api/admin/products?active=false
+Authorization: Bearer {{customerToken}}
+
+### 90. ADMIN Reactivate Product -> 200; stock unchanged
+PATCH {{baseUrl}}/api/products/{{keyboardId}}/availability
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{"active":true}
+
+### 91. Reactivated Product Is Public Again -> 200, active=true
+GET {{baseUrl}}/api/products/{{keyboardId}}
+
+### 92. Missing Active Value -> 400
+PATCH {{baseUrl}}/api/products/{{keyboardId}}/availability
+Authorization: Bearer {{adminToken}}
+Content-Type: application/json
+
+{}
+
+### 93. Anonymous ADMIN Catalog Request -> 401
+GET {{baseUrl}}/api/admin/products?active=false

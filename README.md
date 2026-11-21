@@ -19,7 +19,7 @@ Prices are read from the database and snapshotted when ordering. Order/items, st
 | Language / build | Java 21, Maven 3.9.11 via Maven Wrapper |
 | Application | Spring Boot 3.5.16, Spring Web / MVC |
 | Persistence | Spring Data JPA, Hibernate, Spring JDBC for key arbitration |
-| Database / migrations | PostgreSQL 17, Flyway V1-V6 |
+| Database / migrations | PostgreSQL 17, Flyway V1-V7 |
 | Authentication | Spring Security 6.5.11, OAuth2 Resource Server / JOSE, Nimbus JWT |
 | Password storage | Spring BCryptPasswordEncoder, cost 12 |
 | Validation | Jakarta Validation and service guards |
@@ -84,6 +84,8 @@ Migration [V6](src/main/resources/db/migration/V6__users_order_ownership_and_sco
 
 Old idempotency receipts are retained with NULL user_id and their exact payload/response text. They are archived outside authenticated users' replay scope. New calls use a partial unique index on `(user_id, idempotency_key)`; a separate partial unique index preserves legacy-key uniqueness. An old unscoped key does not recover an old order after this security upgrade. ADMIN can inspect that order by its ID. V1-V5 remain unchanged.
 
+Migration [V7](src/main/resources/db/migration/V7__product_availability.sql) adds `products.active BOOLEAN NOT NULL DEFAULT TRUE`. Every existing product remains active and new products default to active in both Java and PostgreSQL. V1-V6 are unchanged. No stock, order, price snapshot, or inventory movement is rewritten.
+
 User/order foreign keys use RESTRICT, with no cascade deletion of users/history. A user_id index supports order FK checks; the scoped key index also covers receipt user FK lookups. Stock history uses `(product_id, created_at DESC, id DESC)`. The price/ID index supports selective price pages. No plain name index is claimed to accelerate `%keyword%`; pg_trgm is not installed. See [ProductSearchIT](src/test/java/com/example/ordermanagement/integration/ProductSearchIT.java) for generated SQL and measured query plans, not a throughput benchmark.
 
 ## API Endpoints
@@ -100,6 +102,8 @@ Base URL: `http://localhost:8080`. JSON bodies. Supply `Authorization: Bearer <a
 | PUT | `/api/products/{id}` | ADMIN; keep current stock unchanged | 200 |
 | DELETE | `/api/products/{id}` | ADMIN; no order/movement references | 204, empty body |
 | POST | `/api/products/{id}/restock` | ADMIN | 200 |
+| PATCH | `/api/products/{id}/availability` | ADMIN; set active, no stock change | 200 |
+| GET | `/api/admin/products` | ADMIN; active/inactive catalog | 200, page |
 | GET | `/api/products/{id}/stock-movements` | ADMIN | 200, page |
 | POST | `/api/orders` | CUSTOMER or ADMIN; owner from principal | 201, or 200 replay |
 | GET | `/api/orders` | CUSTOMER: own orders; ADMIN: all, including legacy | 200, summary page |
@@ -110,6 +114,34 @@ Base URL: `http://localhost:8080`. JSON bodies. Supply `Authorization: Bearer <a
 | POST | `/api/orders/{id}/cancel` | ADMIN; CREATED -> CANCELLED | 200 |
 
 Customer lookups use `findByIdAndUserId`; another customer's order and an absent order both return 404. ADMIN reads any order, including legacy unowned records. HTTP routes and service `@PreAuthorize` checks enforce roles. No client `role` or `userId` can override this: unknown JSON fields are rejected.
+
+### Product availability
+
+Public `GET /api/products` always filters `active=true` **before** pagination and count. Public `GET /api/products/{id}` returns 404 for inactive products, including when called by ADMIN. Adding `active=false` to a public URL cannot expose them. `ProductResponse` includes `active` in create/update/restock/availability responses and both catalog views.
+
+ADMIN uses `GET /api/admin/products?active=false` to find inactive products. `active=true` selects active products; omitted selects both. The same keyword/minPrice/maxPrice/inStock/page/size/sort rules apply as the public catalog. Both SecurityConfig and service method security require ADMIN. CUSTOMER receives 403, anonymous callers 401. ADMIN can use PUT, restock, inventory history and availability endpoints with an inactive product ID; metadata updates/restock do not automatically reactivate it.
+
+```http
+PATCH /api/products/1/availability
+Authorization: Bearer <ADMIN_ACCESS_TOKEN>
+Content-Type: application/json
+
+{"active":false}
+```
+
+Illustrative 200 response:
+
+```json
+{"id":1,"name":"Mechanical Keyboard","description":"USB keyboard","price":59.90,"stockQuantity":20,"active":false}
+```
+
+Send `{"active":true}` to reactivate. `active` is required and non-null (400 otherwise); unknown JSON fields such as stockQuantity are rejected. A missing product returns 404. Repeating the same value returns 200 with the same state, without changing stock or adding a movement. Availability is separate from inventory; it does not introduce a new movement type. Creation and PUT DTOs cannot set active; use this PATCH.
+
+Ordering and availability changes take the same `PESSIMISTIC_WRITE` product-row lock. OrderService checks active **after acquiring locks** and before mutating any stock: inactive returns 409 and the whole transaction, including any idempotency claim, rolls back. If deactivation commits first, a waiting create sees inactive and fails. If an order gets the lock first and commits, it remains valid; deactivation then stops subsequent purchases. If deactivation rolls back, the waiter can still buy. Multi-product lock ordering remains ascending ID.
+
+Existing orders remain readable and keep their original financial snapshots. ADMIN can cancel an existing CREATED order and restore its stock even if a product is inactive; availability stays false. Inventory history remains available to ADMIN. DELETE still rejects order/movement references, including INITIAL_STOCK: deactivation is the way to stop selling without deleting history. A successful idempotent creation retry still replays its original order after deactivation; it is not a new purchase. Failed inactive purchases do not consume the key and may retry after reactivation.
+
+No boolean-only index is added without query-plan evidence; existing product search indexes remain in use. Availability is a sale flag, not a timestamped audit log or a replacement for lifecycle/stock validation.
 
 ### Order listing, filtering, and pagination
 
@@ -201,7 +233,7 @@ After changing bootstrap flags/password in `.env`, recreate the API with `docker
 ### Swagger UI and health
 
 - [Swagger UI](http://localhost:8080/swagger-ui/index.html): run register/login, then click **Authorize** and paste only the returned accessToken (Swagger adds Bearer). Use CUSTOMER or ADMIN credentials for the operation's permission.
-- [OpenAPI JSON](http://localhost:8080/v3/api-docs), [YAML](http://localhost:8080/v3/api-docs.yaml): 16 documented business operations with DTOs, errors, and security requirements.
+- [OpenAPI JSON](http://localhost:8080/v3/api-docs), [YAML](http://localhost:8080/v3/api-docs.yaml): 18 documented business operations with DTOs, errors, and security requirements.
 - [Health](http://localhost:8080/actuator/health): status only, 200 UP / 503 DOWN. Other management endpoints are not exposed and security denies their requests (401 without authentication, 403 when authenticated). Environment/configprops/heapdump are not public. JMX endpoints and probes are disabled.
 
 Set API_DOCS_ENABLED=false to disable both Swagger and the spec. Authorization is not persisted by Swagger across reloads. Public endpoints can still return 401 if an invalid bearer token is explicitly supplied. The root `/` is not an API endpoint.
@@ -338,4 +370,4 @@ The [CI workflow](.github/workflows/ci.yml) runs verify -Pintegration on push/PR
 - **Migration compatibility:** Keep legacy owners/receipts NULL and ADMIN-only/archived rather than guessing user ownership. New application-created orders always have an owner. Schema nullability is an explicit compatibility limitation, not a claim that raw SQL obeys authorization. Existing API URLs/body shapes remain, with additive response userId; protected endpoints intentionally require authentication now.
 - **Scope:** One application/database, constructor injection, DTO boundaries, explicit Flyway migrations, and targeted indexes. No extra infrastructure is needed for these portfolio features.
 
-Feature verification on 21 November 2026: Maven Wrapper verify -Pintegration completed with BUILD SUCCESS; 469 cases passed (174 unit, 151 MVC, 144 PostgreSQL integration), with zero failures/errors/skips.
+Feature verification on 21 November 2026: Maven Wrapper verify -Pintegration completed with BUILD SUCCESS; 505 cases passed (180 unit, 169 MVC, 156 PostgreSQL integration), with zero failures/errors/skips.

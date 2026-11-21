@@ -29,6 +29,9 @@ public class Product {
     @Column(nullable = false)
     private int stockQuantity;
 
+    @Column(nullable = false)
+    private boolean active = true;
+
     protected Product() { }
 
     public Product(String name, String description, BigDecimal price, int stockQuantity) {
@@ -54,6 +57,16 @@ public class Product {
             throw new ConflictException("Insufficient stock for product " + id
                     + ": requested " + quantity + ", available " + stockQuantity);
         }
+    }
+
+    public void ensureActive() {
+        if (!active) {
+            throw new ConflictException("Product " + id + " is inactive and cannot be ordered");
+        }
+    }
+
+    public void changeAvailability(boolean active) {
+        this.active = active;
     }
 
     public void deductStock(int quantity) {
@@ -84,4 +97,5 @@ public class Product {
     public String getDescription() { return description; }
     public BigDecimal getPrice() { return price; }
     public int getStockQuantity() { return stockQuantity; }
+    public boolean isActive() { return active; }
 }

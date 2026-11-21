@@ -22,6 +22,7 @@ import org.springframework.validation.annotation.Validated;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PatchMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -57,7 +58,8 @@ public class ProductController {
 
     @GetMapping
     @SecurityRequirements
-    @Operation(tags = "Products", summary = "Search and paginate products", description = "All filters are optional and combined with AND. "
+    @Operation(tags = "Products", summary = "Search and paginate products", description = "Public catalog returns active products only, even for ADMIN. "
+            + "Client active parameters cannot expose inactive products; use the ADMIN catalog. All filters are optional and combined with AND. "
             + "Filtering, counting, sorting, and pagination run in PostgreSQL. Price bounds are inclusive and nonnegative; "
             + "minPrice must not exceed maxPrice. page * size must fit a signed 32-bit integer. "
             + "Non-ID sorts append ID ascending as a stable tie-breaker.")
@@ -84,11 +86,22 @@ public class ProductController {
 
     @GetMapping("/{id}")
     @SecurityRequirements
-    @Operation(tags = "Products", summary = "Get a product")
+    @Operation(tags = "Products", summary = "Get a product", description = "Public route: inactive and missing products both return 404, including for ADMIN callers.")
     @ApiResponse(responseCode = "200", description = "Product details", useReturnTypeSchema = true)
     @ApiResponse(responseCode = "404", ref = "#/components/responses/NotFound")
     public ProductResponse getById(@PathVariable @Positive Long id) {
         return productService.getById(id);
+    }
+
+    @PatchMapping("/{id}/availability")
+    @Operation(tags = "Products", summary = "Change product sale availability", description = "ADMIN only. Sets active under the same product write lock as ordering. "
+            + "Repeated requests keep the same state; no stock change or inventory movement. Inactive products are hidden from public reads and new orders return 409. "
+            + "Existing orders/history remain intact. ADMIN can reactivate, update metadata or restock inactive products.")
+    @ApiResponse(responseCode = "200", description = "Product with the requested availability", useReturnTypeSchema = true)
+    @ApiResponse(responseCode = "404", ref = "#/components/responses/NotFound")
+    @ApiResponse(responseCode = "409", ref = "#/components/responses/Conflict")
+    public ProductResponse changeAvailability(@PathVariable @Positive Long id, @Valid @RequestBody ProductAvailabilityRequest request) {
+        return productService.changeAvailability(id, request);
     }
 
     @PutMapping("/{id}")

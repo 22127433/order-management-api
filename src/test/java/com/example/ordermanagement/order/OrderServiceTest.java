@@ -107,6 +107,23 @@ class OrderServiceTest {
     }
 
     @Test
+    void inactiveProductIsRejectedAfterLocksBeforeAnyStockOrOrderWrite() {
+        Product first = product(1L, "1.00", 5);
+        Product inactive = product(2L, "2.00", 5);
+        inactive.changeAvailability(false);
+        when(productRepository.findByIdForUpdate(1L)).thenReturn(Optional.of(first));
+        when(productRepository.findByIdForUpdate(2L)).thenReturn(Optional.of(inactive));
+        assertThatThrownBy(() -> service.create(request(item(2L, 1), item(1L, 1))))
+                .isInstanceOf(ConflictException.class).hasMessageContaining("inactive");
+        assertThat(first.getStockQuantity()).isEqualTo(5);
+        assertThat(inactive.getStockQuantity()).isEqualTo(5);
+        var locks = inOrder(productRepository);
+        locks.verify(productRepository).findByIdForUpdate(1L);
+        locks.verify(productRepository).findByIdForUpdate(2L);
+        verifyNoInteractions(orderRepository, stockMovementRepository);
+    }
+
+    @Test
     void insufficientStockDoesNotChangeOtherProducts() {
         Product first = product(1L, "10.00", 10);
         Product second = product(2L, "20.00", 1);

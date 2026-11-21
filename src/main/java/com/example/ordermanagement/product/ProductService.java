@@ -38,7 +38,7 @@ public class ProductService {
     }
 
     public ProductResponse getById(Long id) {
-        return ProductResponse.from(productRepository.findById(id)
+        return ProductResponse.from(productRepository.findByIdAndActiveTrue(id)
                 .orElseThrow(() -> new ResourceNotFoundException("Product", id)));
     }
 
@@ -47,8 +47,29 @@ public class ProductService {
     }
 
     public PageResponse<ProductResponse> findAll(ProductSearchQuery search) {
-        return PageResponse.from(productRepository.findAll(ProductSpecifications.matching(search), search.pageable())
+        return search(search, true);
+    }
+
+    @PreAuthorize("hasRole('ADMIN')")
+    public PageResponse<ProductResponse> findAllForAdmin(ProductSearchQuery search, Boolean active) {
+        return search(search, active);
+    }
+
+    private PageResponse<ProductResponse> search(ProductSearchQuery search, Boolean active) {
+        return PageResponse.from(productRepository.findAll(ProductSpecifications.matching(search, active), search.pageable())
                 .map(ProductResponse::from));
+    }
+
+    @Transactional
+    @PreAuthorize("hasRole('ADMIN')")
+    public ProductResponse changeAvailability(Long id, ProductAvailabilityRequest request) {
+        if (request == null || request.active() == null) {
+            throw new BadRequestException("active is required");
+        }
+        // Share the same product-row lock as ordering, restock, metadata updates, and deletion.
+        Product product = findForUpdate(id);
+        product.changeAvailability(request.active());
+        return ProductResponse.from(product);
     }
 
     @Transactional

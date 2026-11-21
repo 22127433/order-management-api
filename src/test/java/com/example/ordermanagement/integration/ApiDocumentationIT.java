@@ -57,11 +57,11 @@ class ApiDocumentationIT extends com.example.ordermanagement.support.JwtTestProp
         assertThat(spec.path("openapi").asText()).startsWith("3.0.");
         assertThat(spec.at("/info/title").asText()).isEqualTo("Order Management API");
         for (String path : List.of("/api/auth/register", "/api/auth/login", "/api/products", "/api/products/{id}", "/api/products/{id}/restock",
-                "/api/products/{id}/stock-movements", "/api/orders", "/api/orders/{id}",
+                "/api/products/{id}/stock-movements", "/api/products/{id}/availability", "/api/admin/products", "/api/orders", "/api/orders/{id}",
                 "/api/orders/{id}/confirm", "/api/orders/{id}/ship", "/api/orders/{id}/deliver", "/api/orders/{id}/cancel")) {
             assertThat(spec.path("paths").has(path)).as(path).isTrue();
         }
-        assertThat(spec.path("paths").size()).isEqualTo(12);
+        assertThat(spec.path("paths").size()).isEqualTo(14);
         int operations = 0;
         for (JsonNode path : spec.path("paths")) {
             for (JsonNode operation : path) {
@@ -73,8 +73,31 @@ class ApiDocumentationIT extends com.example.ordermanagement.support.JwtTestProp
                 }
             }
         }
-        assertThat(operations).isEqualTo(16);
+        assertThat(operations).isEqualTo(18);
         assertReferencesResolve(spec, spec);
+    }
+
+    @Test
+    void availabilityAndAdminCatalogDocumentValidationSecurityAndPublicVisibility() {
+        JsonNode spec = specification();
+        JsonNode availability = spec.path("paths").path("/api/products/{id}/availability").path("patch");
+        assertThat(availability.path("description").asText()).contains("ADMIN only", "no stock change", "409");
+        assertThat(availability.has("security")).isFalse();
+        for (String code : List.of("200", "400", "401", "403", "404", "409", "500")) {
+            assertThat(availability.path("responses").has(code)).as(code).isTrue();
+        }
+        JsonNode request = spec.at("/components/schemas/ProductAvailabilityRequest");
+        assertThat(request.path("required").toString()).contains("active");
+        assertThat(request.at("/properties/active/type").asText()).isEqualTo("boolean");
+        assertThat(spec.at("/components/schemas/ProductResponse/properties/active/type").asText()).isEqualTo("boolean");
+        JsonNode admin = spec.path("paths").path("/api/admin/products").path("get");
+        assertThat(admin.path("description").asText()).contains("ADMIN only", "false selects inactive");
+        assertThat(admin.has("security")).isFalse();
+        assertThat(spec.path("security").get(0).has("bearerAuth")).isTrue();
+        assertThat(parameter(admin, "active").path("required").asBoolean()).isFalse();
+        assertThat(parameter(admin, "size").at("/schema/maximum").asInt()).isEqualTo(100);
+        assertThat(spec.path("paths").path("/api/products").path("get").path("description").asText()).contains("active products only");
+        assertThat(spec.path("paths").path("/api/products/{id}").path("get").path("description").asText()).contains("404");
     }
 
     @Test

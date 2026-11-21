@@ -50,7 +50,7 @@ public class OrderController {
     @PostMapping
     @Operation(summary = "Create an order", description = "CUSTOMER or ADMIN. Owner comes from the authenticated principal; client userId is rejected. "
             + "Accepts 1–100 distinct products, each with quantity 1–1000000. "
-            + "Locks products by ascending ID, calculates BigDecimal price snapshots, and deducts stock with inventory movements "
+            + "Locks products by ascending ID, rejects inactive products with 409, calculates BigDecimal price snapshots, and deducts stock with inventory movements "
             + "in one transaction. An optional Idempotency-Key makes retries durable in PostgreSQL: equivalent payloads replay the "
             + "original creation snapshot, even after the order changes state. Reordering items does not change payload identity. "
             + "A different valid payload using a committed key returns 409. Concurrent callers wait for the key owner; lock timeout "

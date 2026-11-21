@@ -1253,7 +1253,54 @@ Unit test không mở transaction PostgreSQL. JwtConfigTest dùng Nimbus thật 
 | listingDoesNotChangeDetailResponseOrAnyBusinessData | Detail vẫn có items/userId; stock, movements, receipt và số đơn không đổi. |
 | unauthenticatedRequestIs401AndInvalidFiltersAre400WithRealBackend | Kiểm tra status HTTP bằng filter và backend thật. |
 
-**OpenAPI:** `orderListingDocumentsFiltersSummaryPaginationAndInheritedBearerSecurity` trong [ApiDocumentationIT][apidocit] kiểm tra5 query params, schema summary4 field, pagination/status/error và bearer requirement kế thừa. Spec hiện có16 operations/12paths; mốc smoke15 operation ngày18/11 ở trên là lịch sử. Các test listing không thay cho bằng chứng rollback/concurrency của OrderManagementIT/OrderIdempotencyIT; toàn bộ regression vẫn được giữ. [OrderManagementIT][it], [OrderIdempotencyIT][idemit].
+**OpenAPI:** `orderListingDocumentsFiltersSummaryPaginationAndInheritedBearerSecurity` trong [ApiDocumentationIT][apidocit] kiểm tra5 query params, schema summary4 field, pagination/status/error và bearer requirement kế thừa. Spec hiện có18 operations/14paths; mốc smoke15 operation ngày18/11 ở trên là lịch sử. Các test listing không thay cho bằng chứng rollback/concurrency của OrderManagementIT/OrderIdempotencyIT; toàn bộ regression vẫn được giữ. [OrderManagementIT][it], [OrderIdempotencyIT][idemit].
+
+### 8.12. Product active/inactive: ngừng bán nhưng giữ lịch sử
+
+**Nền tảng:** “Còn hàng” và “đang bán” là hai điều khác nhau. Kho có thể còn10 chiếc nhưng cửa hàng muốn ngừng bán. Xóa vật lý sẽ làm mất hoặc phá tham chiếu lịch sử; active=false chỉ ngăn giao dịch mua mới. Product.active là boolean khác stockQuantity và OrderStatus. Căn cứ: [Product][product], [migration V7][availabilityschema], [ProductService][ps].
+
+**Trace PATCH /api/products/{id}/availability:** Filter ADMIN → ProductController nhận ProductAvailabilityRequest @Valid, active bắt buộc → ProductService.changeAvailability @PreAuthorize ADMIN và @Transactional → findByIdForUpdate khóa cùng product row như create Order → entity gán boolean → dirty checking commit → ProductResponse có active. Không sửa stock, không thêm movement; gửi false hai lần không nhân đôi thao tác kho. Căn cứ: [ProductController][pc], [ProductAvailabilityRequest][availabilityrequest], [ProductService][ps], [ProductRepository][pr], [ProductResponse][presp].
+
+**Public/admin:** Public list luôn Specification active=true trước page/count; GET detail dùng findByIdAndActiveTrue và404 cho inactive, ngay cả caller ADMIN. Query active=false trên public không thay được predicate bắt buộc. ADMIN tìm bằng GET /api/admin/products, filter active tùy chọn (true/false/omitted=cả hai), giữ các filter/page/sort cũ. SecurityConfig chặn CUSTOMER và service cũng @PreAuthorize để không bypass qua gọi bean trực tiếp. Không cần admin detail endpoint riêng vì ADMIN catalog đã trả đầy đủ ProductResponse. Căn cứ: [AdminProductController][adminproducts], [SecurityConfig][securityconfig], [ProductService][ps], [ProductSpecifications][specifications].
+
+**Sau khi inactive:** OrderService.create lấy đủ khóa theo ID tăng dần, rồi ensureActive và ensureStockAvailable trước vòng mutate. Inactive trả409; mọi key/order/stock/journal mới trong transaction rollback. Order cũ vẫn đọc được và chỉ CREATED mới được hủy/hoàn kho, không tự bật active lại. Restock/PUT metadata của ADMIN cũng không bật active. DELETE vẫn từ chối bất kỳ order/movement reference nào. Căn cứ: [OrderService][os], [ProductService][ps], [IdempotentOrderService][idemservice]. Retry receipt đã commit vẫn trả snapshot cũ dù product inactive, vì không tạo purchase mới. [ProductAvailabilityIT][availabilityit].
+
+**Concurrency:** Deactivate và tạo đơn cùng PESSIMISTIC_WRITE trên product row. Nếu deactivate commit trước, SELECT FOR UPDATE đang chờ đọc trạng thái inactive mới nhất và create lỗi409. Nếu create giữ khóa trước, order được commit hợp lệ rồi deactivate mới hoàn thành. Nếu deactivate rollback, waiter vẫn mua được khi đủ stock. Deactivate chỉ khóa một product, không thêm bước khóa order; cancel vẫn order trước/products tăng dần. Căn cứ code: [ProductService.changeAvailability][ps], [OrderService.create/cancel][os]. Bằng chứng ba interleaving có kiểm soát: [ProductAvailabilityIT][availabilityit], không phải stress test mọi lịch chạy.
+
+**Migration:** V7 chỉ ALTER ADD COLUMN active BOOLEAN NOT NULL DEFAULT TRUE, giữ V1–V6. Java constructor cũng mặc định true. Test migrate schema riêng từ V6, giữ price/stock/order/item/movement và kiểm tra insert SQL bỏ active vẫn true. Không thêm boolean-only index khi chưa có số liệu query plan. [V7][availabilityschema], [Product][product], [ProductAvailabilityIT][availabilityit].
+
+**Trả lời phỏng vấn:** “Em dùng active thay vì nới DELETE để giữ các foreign key và inventory history. Public lọc active ở database; admin dùng catalog bảo vệ riêng. Điểm quan trọng là create Order kiểm tra active sau khi khóa, cùng khóa với deactivate; chỉ check ở controller có thể gặp race. Transaction thắng trước quyết định hành vi, và đơn đã mua không bị vô hiệu hóa về sau. Em kiểm tra cả hai chiều cùng trường hợp rollback bằng PostgreSQL lock wait, thay vì chỉ test mock.” [ProductService][ps], [OrderService][os], [ProductAvailabilityIT][availabilityit].
+
+Các test mới (phân biệt mock với PostgreSQL thật):
+
+| Class/method | Ý nghĩa và giới hạn |
+| --- | --- |
+| [ProductServiceTest][pst] — availabilityChangesLockProductWithoutChangingStockOrWritingMovements | Mock lock và entity thật; false/false/true/true giữ stock, không journal. Không chứng minh khóa DB. |
+| [ProductServiceTest][pst] — availabilityRequiresValueBeforeAcquiringLock | Request null/active null bị chặn trước repository. |
+| [ProductServiceTest][pst] — availabilityMissingProductReturnsNotFoundWithoutHistoryWrite | Thiếu product trả not found, không ghi journal. |
+| [ProductServiceTest][pst] — publicReadCannotFallBackToInactiveProductLookup | Không fallback sang findById không lọc active. |
+| [ProductServiceTest][pst] — adminCatalogReusesDatabasePaginationAndIncludesAvailabilityInDto | Mock Page, kiểm tra DTO active=false và không gọi findAll không page. |
+| [OrderServiceTest][ost] — inactiveProductIsRejectedAfterLocksBeforeAnyStockOrOrderWrite | Hai product, một inactive; khóa ID đúng thứ tự rồi409, không mutate stock/save order/movement. |
+| [ProductAvailabilityControllerTest][availabilityweb] — adminCanSetAvailabilityAndReceivesUnchangedStock | PATCH ADMIN200, DTO active/stock đúng. |
+| [ProductAvailabilityControllerTest][availabilityweb] — invalidAvailabilityBodiesReturn400BeforeService | Sáu body sai/null/unknown field trả400, không service. |
+| [ProductAvailabilityControllerTest][availabilityweb] — missingProductAndInvalidIdKeepStandardErrors | 404 product thiếu,400 ID không dương. |
+| [ProductAvailabilityControllerTest][availabilityweb] — nonAdminsCannotChangeAvailabilityOrAccessAdminCatalog | CUSTOMER/AUDITOR403 cho PATCH và ADMIN catalog. |
+| [ProductAvailabilityControllerTest][availabilityweb] — anonymousAdminEndpointsReturn401 | Cả hai route không token401. |
+| [ProductAvailabilityControllerTest][availabilityweb] — adminCatalogBindsActiveAndReusesSearchValidationAndPagination | Bind active=false cùng search/page/sort tới service mock. |
+| [ProductAvailabilityControllerTest][availabilityweb] — adminCatalogOmittedActiveIncludesBothAndPublicCannotChooseInactive | ADMIN active=null, public không nhận active làm scope input. |
+| [ProductAvailabilityControllerTest][availabilityweb] — adminCatalogRejectsInvalidSearchBeforeService | Active sai, size, range, sort hoặc offset sai400. |
+| [ProductAvailabilityIT][availabilityit] — newProductDefaultsActiveAndRepeatedAvailabilityPatchOnlyChangesFlag | DB/JPA/filter thật; toggle lặp không đổi stock/history. |
+| [ProductAvailabilityIT][availabilityit] — publicReadsNeverExposeInactiveEvenWithClientFilterOrAdminIdentity | Anonymous/CUSTOMER/ADMIN public reads không lộ inactive. |
+| [ProductAvailabilityIT][availabilityit] — adminCatalogFiltersAvailabilityAndCountsBeforePagination | ADMIN true/false/omitted; AND search trước page/count, public chỉ active. |
+| [ProductAvailabilityIT][availabilityit] — inactiveOrderFailsWithoutStockJournalOrIdempotencyWriteThenReactivationAllowsRetry | JWT CUSTOMER thật;409 rollback key, bật lại201, tắt lại replay200 không trừ thêm. |
+| [ProductAvailabilityIT][availabilityit] — existingOrdersRemainReadableAndCancellableWhileProductIsInactive | Owner đọc giá snapshot, ADMIN hủy/hoàn kho, product vẫn inactive và DELETE vẫn409. |
+| [ProductAvailabilityIT][availabilityit] — adminsCanUpdateRestockAndReadHistoryWithoutReactivatingProduct | PUT/restock/history hoạt động với inactive, không tự bật bán. |
+| [ProductAvailabilityIT][availabilityit] — customerAndAnonymousCannotUseAdminAvailabilityAndServiceChecksCannotBeBypassed | HTTP401/403 và gọi service proxy CUSTOMER vẫn bị từ chối. |
+| [ProductAvailabilityIT][availabilityit] — deactivationWinsLockAndWaitingOrderIsRejectedWithoutStockWrite | pg_stat_activity xác nhận create chờ lock; commit inactive rồi waiter lỗi, stock/order/history nguyên. |
+| [ProductAvailabilityIT][availabilityit] — orderWinsLockAndDeactivationWaitsWithoutUndoingCommittedOrder | Deactivate chờ create commit; order còn đọc được, deduction đúng một lần. |
+| [ProductAvailabilityIT][availabilityit] — rolledBackDeactivationLetsWaitingOrderProceed | Rollback transaction deactivate đang giữ lock; waiter mua được và journal/stock commit đúng. |
+| [ProductAvailabilityIT][availabilityit] — v7MigrationPreservesLegacyProductsOrdersAndMovementsAndDefaultsNewRowsActive | Schema riêng V6→V7, dữ liệu cũ giữ nguyên, mọi product active và default SQL true. |
+| [ApiDocumentationIT][apidocit] — availabilityAndAdminCatalogDocumentValidationSecurityAndPublicVisibility | Spec schema boolean/required, bearer requirement, status, admin active filter, public visibility. Không thay thế authorization runtime test. |
 
 ## Bản đồ source để mở nhanh khi luyện nói
 
@@ -1359,6 +1406,16 @@ Unit test không mở transaction PostgreSQL. JwtConfigTest dùng Nimbus thật 
 [authenticatedbase]: src/test/java/com/example/ordermanagement/support/AuthenticatedIntegrationTest.java
 [jwtfixture]: src/test/java/com/example/ordermanagement/support/JwtTestProperties.java
 [testsecurity]: src/test/java/com/example/ordermanagement/support/TestSecurity.java
+
+[adminproducts]: src/main/java/com/example/ordermanagement/product/AdminProductController.java
+
+[availabilityit]: src/test/java/com/example/ordermanagement/integration/ProductAvailabilityIT.java
+
+[availabilityrequest]: src/main/java/com/example/ordermanagement/product/ProductAvailabilityRequest.java
+
+[availabilityschema]: src/main/resources/db/migration/V7__product_availability.sql
+
+[availabilityweb]: src/test/java/com/example/ordermanagement/web/ProductAvailabilityControllerTest.java
 
 [listingit]: src/test/java/com/example/ordermanagement/integration/OrderListingIT.java
 

@@ -42,6 +42,7 @@ public class OrderService {
         Map<Long, Product> products = lockProducts(quantities);
         quantities.forEach((id, quantity) -> {
             Product product = products.get(id);
+            product.ensureActive();
             product.ensureStockAvailable(quantity);
         });
 

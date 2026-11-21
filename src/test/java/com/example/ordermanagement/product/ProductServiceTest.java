@@ -207,13 +207,63 @@ class ProductServiceTest {
 
     @Test
     void missingProductFailsReadUpdateAndDelete() {
-        when(repository.findById(1L)).thenReturn(Optional.empty());
+        when(repository.findByIdAndActiveTrue(1L)).thenReturn(Optional.empty());
         when(repository.findByIdForUpdate(1L)).thenReturn(Optional.empty());
         assertThatThrownBy(() -> service.getById(1L)).isInstanceOf(ResourceNotFoundException.class);
         assertThatThrownBy(() -> service.update(1L, request())).isInstanceOf(ResourceNotFoundException.class);
         assertThatThrownBy(() -> service.delete(1L)).isInstanceOf(ResourceNotFoundException.class);
         assertThatThrownBy(() -> service.restock(1L, new RestockRequest(1, "Delivery")))
                 .isInstanceOf(ResourceNotFoundException.class);
+    }
+
+    @Test
+    void availabilityChangesLockProductWithoutChangingStockOrWritingMovements() {
+        Product product = product();
+        when(repository.findByIdForUpdate(1L)).thenReturn(Optional.of(product));
+        assertThat(product.isActive()).isTrue();
+        for (boolean active : List.of(false, false, true, true)) {
+            ProductResponse response = service.changeAvailability(1L, new ProductAvailabilityRequest(active));
+            assertThat(response.active()).isEqualTo(active);
+            assertThat(response.stockQuantity()).isEqualTo(1);
+            assertThat(response.name()).isEqualTo("Old");
+        }
+        verify(repository, org.mockito.Mockito.times(4)).findByIdForUpdate(1L);
+        verifyNoInteractions(stockMovementRepository, orderItemRepository);
+        verify(repository, never()).save(any());
+    }
+
+    @Test
+    void availabilityRequiresValueBeforeAcquiringLock() {
+        assertThatThrownBy(() -> service.changeAvailability(1L, null)).isInstanceOf(BadRequestException.class);
+        assertThatThrownBy(() -> service.changeAvailability(1L, new ProductAvailabilityRequest(null)))
+                .isInstanceOf(BadRequestException.class);
+        verifyNoInteractions(repository, stockMovementRepository);
+    }
+
+    @Test
+    void availabilityMissingProductReturnsNotFoundWithoutHistoryWrite() {
+        when(repository.findByIdForUpdate(1L)).thenReturn(Optional.empty());
+        assertThatThrownBy(() -> service.changeAvailability(1L, new ProductAvailabilityRequest(false)))
+                .isInstanceOf(ResourceNotFoundException.class);
+        verifyNoInteractions(stockMovementRepository);
+    }
+
+    @Test
+    void publicReadCannotFallBackToInactiveProductLookup() {
+        when(repository.findByIdAndActiveTrue(1L)).thenReturn(Optional.empty());
+        assertThatThrownBy(() -> service.getById(1L)).isInstanceOf(ResourceNotFoundException.class);
+        verify(repository, never()).findById(any());
+    }
+
+    @Test
+    void adminCatalogReusesDatabasePaginationAndIncludesAvailabilityInDto() {
+        Product product = product();
+        product.changeAvailability(false);
+        var search = new ProductSearchQuery(null, null, null, null, 0, 20, null);
+        when(repository.findAll(ArgumentMatchers.<Specification<Product>>any(), eq(search.pageable())))
+                .thenReturn(new PageImpl<>(List.of(product), search.pageable(), 1));
+        assertThat(service.findAllForAdmin(search, false).content()).extracting(ProductResponse::active).containsExactly(false);
+        verify(repository, never()).findAll();
     }
 
     private ProductRequest request() {
